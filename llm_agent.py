@@ -48,7 +48,7 @@ You are an IT Support Assistant. Your task is to analyze user requests and deter
     "message": "Please provide the Purchase Order number you wish to cancel."
   }}
   ```
-- If the request is for something else entirely, or if no tool is suitable, respond naturally in plain text, stating that you cannot fulfill the request or providing a helpful answer if possible.
+- **IMPORTANT:** If the request is for something else entirely, or if no tool (including asking for PO info) is suitable, respond naturally in plain text. DO NOT output JSON in these cases. State clearly that you cannot fulfill the request or provide a helpful answer if possible.
 - DO NOT include any conversational text or explanation outside of the JSON block if you are outputting JSON.
 
 User Request: {user_input}
@@ -60,17 +60,16 @@ User Request: {user_input}
     llm_output = llm.invoke(prompt.format(user_input=user_request))
     print(f"LLM Raw Output:\n{llm_output}\n")
 
-    # --- NEW: Extract JSON from Markdown code block ---
+    # --- Extract JSON from Markdown code block ---
     json_match = re.search(r"```json\s*(.*?)\s*```", llm_output, re.DOTALL)
     json_string = ""
     if json_match:
         json_string = json_match.group(1)
         print(f"Extracted JSON String:\n{json_string}\n")
     else:
-        print("No JSON code block found in LLM output.")
-        # If no JSON block, proceed as if it's a natural language response
-        print("LLM outputted a natural language response (not JSON).")
-        print(f"\nFinal Response: {llm_output}")
+        print("No JSON code block found in LLM output. Treating as natural language response.")
+        # If no JSON block, treat it as a natural language response
+        print(f"\nFinal Response: {llm_output.strip()}") # .strip() to remove leading/trailing whitespace/newlines
         return # Exit the function if no JSON block is found
 
     try:
@@ -88,7 +87,8 @@ User Request: {user_input}
                 result = _call_admin_panel_job(CANCEL_PO_JOB_ID, {"ponumber": ponumber}, AUTH_TOKEN)
                 print("\nTool Execution Result:")
                 print(result)
-                print(f"\nFinal Response: The request to cancel PO {ponumber} has been processed. Result: {result}")
+                # Concise final response
+                print(f"\nFinal Response: The request to cancel PO {ponumber} has been processed. Status: {result}")
             else:
                 print("LLM requested an unknown tool or missing parameters.")
                 print(f"\nFinal Response: I'm sorry, I couldn't process that request as the tool or parameters were not recognized.")
@@ -116,11 +116,6 @@ if __name__ == "__main__":
         print("\033[91mERROR: Please update AUTH_TOKEN in langchain_tools.py before running this script.\033[0m")
         exit()
 
-    # Scenario 1: Direct Match
-    process_user_request("I need to cancel Purchase Order number 803080. Can you please process this?")
-
-    # Scenario 2: Request it cannot handle
-    process_user_request("What is the current weather in London?")
-
-    # Scenario 3: Missing Info
-    process_user_request("I need to cancel a purchase order. Which one?")
+    # Scenario: Direct Match for demonstration
+    user_request_demo = "I need to cancel Purchase Order number 803080. Can you please process this?"
+    process_user_request(user_request_demo)
