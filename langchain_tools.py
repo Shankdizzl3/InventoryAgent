@@ -11,7 +11,7 @@ API_JOB_RUN_ENDPOINT = f"{API_BASE_URL}/job/run"
 # --- Authorization Token ---
 # IMPORTANT: Replace 'YOUR_BEARER_TOKEN_HERE' with your actual Authorization Token.
 # This token will be used by the tool when called.
-AUTH_TOKEN = "0a31a57f-6615-42b5-9062-8b043770a52d" # Ensure this is your actual token
+AUTH_TOKEN = "f58a1284-720c-4836-9546-b862d43ccfe2" # Ensure this is your actual token
 
 # --- Define the API Call Function ---
 def _call_admin_panel_job(job_id: int, params: dict, auth_token: str) -> str:

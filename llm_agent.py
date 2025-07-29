@@ -12,11 +12,16 @@ from langchain_tools import _call_admin_panel_job, AUTH_TOKEN
 OLLAMA_MODEL = "phi3:mini"
 CANCEL_PO_JOB_ID = 4 # The job ID for "Cancel PO main record"
 
-def process_user_request(user_request: str):
+def process_user_request_for_demo(user_request: str):
     """
-    Uses LLM for intent recognition and parameter extraction, then directly calls the tool.
+    Demonstrates LLM intent recognition and direct tool invocation for a single request.
+    This version is designed for clean, professional output.
     """
-    print(f"\n--- Processing User Request: {user_request} ---")
+    print("\n" + "="*80)
+    print(f" DEMONSTRATION SCENARIO: Processing a Purchase Order Cancellation Request")
+    print("="*80 + "\n")
+
+    print(f"1. Simulated User Request (ServiceNow Ticket Description):\n   \"{user_request}\"\n")
 
     llm = OllamaLLM(model=OLLAMA_MODEL)
 
@@ -56,20 +61,19 @@ User Request: {user_input}
     prompt = PromptTemplate.from_template(prompt_template_string)
 
     # Invoke the LLM
-    print("Asking LLM for intent and parameters...")
-    llm_output = llm.invoke(prompt.format(user_input=user_request))
-    print(f"LLM Raw Output:\n{llm_output}\n")
+    print("2. Asking LLM for Intent and Parameters...")
+    llm_raw_output = llm.invoke(prompt.format(user_input=user_request))
+    print(f"   LLM Raw Output:\n{llm_raw_output}\n")
 
     # --- Extract JSON from Markdown code block ---
-    json_match = re.search(r"```json\s*(.*?)\s*```", llm_output, re.DOTALL)
+    json_match = re.search(r"```json\s*(.*?)\s*```", llm_raw_output, re.DOTALL)
     json_string = ""
     if json_match:
         json_string = json_match.group(1)
-        print(f"Extracted JSON String:\n{json_string}\n")
+        print(f"3. Extracted JSON Intent from LLM Output:\n{json_string}\n")
     else:
-        print("No JSON code block found in LLM output. Treating as natural language response.")
-        # If no JSON block, treat it as a natural language response
-        print(f"\nFinal Response: {llm_output.strip()}") # .strip() to remove leading/trailing whitespace/newlines
+        print("   No JSON code block found in LLM output. Treating as natural language response.")
+        print(f"\n4. Final Response from LLM (Natural Language):\n   \"{llm_raw_output.strip()}\"")
         return # Exit the function if no JSON block is found
 
     try:
@@ -82,20 +86,23 @@ User Request: {user_input}
             ponumber = parameters.get("ponumber")
 
             if tool_name == "cancel_po_main_record" and ponumber:
-                print(f"LLM wants to call tool: {tool_name} with ponumber: {ponumber}")
+                print(f"4. LLM Identified Action: Call '{tool_name}' tool with PO Number: {ponumber}\n")
+                print("5. Executing Custom API Call (Admin Panel Job 'Cancel PO main record')...")
                 # Directly call the underlying API function
-                result = _call_admin_panel_job(CANCEL_PO_JOB_ID, {"ponumber": ponumber}, AUTH_TOKEN)
-                print("\nTool Execution Result:")
-                print(result)
-                # Concise final response
-                print(f"\nFinal Response: The request to cancel PO {ponumber} has been processed. Status: {result}")
+                api_call_result = _call_admin_panel_job(CANCEL_PO_JOB_ID, {"ponumber": ponumber}, AUTH_TOKEN)
+                print(f"\n6. API Call Result:\n   {api_call_result}\n")
+                
+                # Formulate a concise final response based on the API result
+                final_response_message = f"The request to cancel Purchase Order {ponumber} has been processed. Status: {api_call_result}"
+                print(f"7. Final Response to User:\n   \"{final_response_message}\"")
             else:
                 print("LLM requested an unknown tool or missing parameters.")
                 print(f"\nFinal Response: I'm sorry, I couldn't process that request as the tool or parameters were not recognized.")
 
         elif parsed_output.get("action") == "ask_for_info":
             message = parsed_output.get("message", "I need more information to proceed.")
-            print(f"\nFinal Response: {message}")
+            print(f"4. LLM Identified Action: Ask for Missing Information")
+            print(f"\n5. Final Response to User:\n   \"{message}\"")
 
         else:
             print("LLM outputted JSON but with an unknown action type.")
@@ -111,11 +118,12 @@ User Request: {user_input}
 
 
 if __name__ == "__main__":
-    # Ensure AUTH_TOKEN is set in langchain_tools.py
+    # --- IMPORTANT: Ensure AUTH_TOKEN is set in langchain_tools.py ---
     if AUTH_TOKEN == "YOUR_BEARER_TOKEN_HERE":
         print("\033[91mERROR: Please update AUTH_TOKEN in langchain_tools.py before running this script.\033[0m")
         exit()
 
-    # Scenario: Direct Match for demonstration
-    user_request_demo = "I need to cancel Purchase Order number 803080. Can you please process this?"
-    process_user_request(user_request_demo)
+    # --- DEMONSTRATION SCENARIO ---
+    # This simulates a user's request (e.g., from a ServiceNow ticket description).
+    demo_user_request = "I need to cancel Purchase Order number 803080. Can you please process this?"
+    process_user_request_for_demo(demo_user_request)
