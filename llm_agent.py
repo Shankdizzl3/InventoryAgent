@@ -4,13 +4,14 @@ import re # Import regex module
 from langchain_ollama import OllamaLLM
 from langchain_core.prompts import PromptTemplate
 
-# Import your custom tool's underlying function, not the LangChain Tool object
-# We need the direct function to call it after parsing LLM output
-from langchain_tools import _call_admin_panel_job, AUTH_TOKEN
+# Import your custom tool's underlying functions
+# Now importing both the main PO cancellation and the quantity cancellation tool
+from langchain_tools import _call_admin_panel_job, AUTH_TOKEN, cancel_po_main_record, cancel_po_quantity
 
 # --- Configuration ---
 OLLAMA_MODEL = "phi3:mini"
-CANCEL_PO_JOB_ID = 4 # The job ID for "Cancel PO main record"
+CANCEL_PO_MAIN_JOB_ID = 4 # Job ID for "Cancel PO main record"
+CANCEL_PO_QUANTITY_JOB_ID = 6 # Job ID for "Cancel PO quantity"
 
 def process_user_request_for_demo(user_request: str):
     """
@@ -27,35 +28,37 @@ def process_user_request_for_demo(user_request: str):
     llm = OllamaLLM(model=OLLAMA_MODEL)
 
     # --- Prompt for Intent and Parameter Extraction ---
-    # This prompt instructs the LLM on its role and how to use the available tool.
+    # This prompt instructs the LLM on its role and how to use the available tools.
     # It guides the LLM to output a specific JSON format if a tool is needed,
     # or plain text if the request is out of scope or requires clarification.
     prompt_template_string = """
-You are an IT Support Assistant. Your task is to analyze user requests and determine if they require calling the 'cancel_po_main_record' tool.
+You are an IT Support Assistant. Your task is to analyze user requests and determine if they require calling any of the available tools.
 
-**Tool Description:**
-- `cancel_po_main_record(ponumber: str)`: Cancels a Purchase Order (PO) in the PurchaseOrderMain system. Use this tool when a user explicitly requests to cancel a PO and provides a PO number. The PO number must be a string of digits.
+**Available Tools:**
+- `cancel_po_main_record(ponumber: str)`: Cancels an entire Purchase Order (PO) in the PurchaseOrderMain system, including its associated quantities. Use this tool when a user explicitly requests to cancel an *entire* PO and provides a PO number. The PO number must be a string of digits.
+- `cancel_po_quantity(ponumber: str)`: Cancels or updates the quantity of items for a specific Purchase Order (PO). This tool is used when the user wants to adjust the quantity of an existing PO, often setting it to zero, or cancelling only a part of the PO, *without* cancelling the entire PO record. Use this when the user mentions cancelling a quantity, reducing items, or cancelling only a part of a PO. The PO number must be a string of digits.
 
 **Instructions:**
-- If the user's request clearly indicates a need to cancel a PO and provides a PO number, respond with a JSON object in the following format:
+- If the user's request clearly indicates a need to call a tool and provides all necessary parameters, respond with a JSON object in the following format:
   ```json
   {{
     "action": "call_tool",
-    "tool_name": "cancel_po_main_record",
+    "tool_name": "THE_TOOL_NAME_HERE",
     "parameters": {{
-      "ponumber": "THE_EXTRACTED_PO_NUMBER_HERE"
+      "param1": "VALUE1",
+      "param2": "VALUE2"
     }}
   }}
   ```
-- If the user's request is about canceling a PO but is missing the PO number, respond with a JSON object in the following format:
+- If the user's request is about using a tool but is missing required information, respond with a JSON object in the following format:
   ```json
   {{
     "action": "ask_for_info",
-    "missing_info": "ponumber",
-    "message": "Please provide the Purchase Order number you wish to cancel."
+    "missing_info": "PARAMETER_NAME",
+    "message": "Please provide the missing information."
   }}
   ```
-- **IMPORTANT:** If the request is for something else entirely, or if no tool (including asking for PO info) is suitable, respond naturally in plain text. DO NOT output JSON in these cases. State clearly that you cannot fulfill the request or provide a helpful answer if possible.
+- **IMPORTANT:** If the request is for something else entirely, or if no tool (including asking for info) is suitable, respond naturally in plain text. DO NOT output JSON in these cases. State clearly that you cannot fulfill the request or provide a helpful answer if possible.
 - **CRITICAL:** When outputting JSON, ensure your response contains ONLY the JSON code block (```json...```). Do NOT include any other text, explanations, or conversational phrases before or after the JSON block.
 
 User Request: {user_input}
@@ -68,7 +71,6 @@ User Request: {user_input}
     print(f"   LLM Raw Output:\n{llm_raw_output}\n")
 
     # --- Attempt to Extract and Parse JSON from LLM Output ---
-    # Use re.DOTALL to match across newlines, and find the first occurrence
     json_match = re.search(r"```json\s*(.*?)\s*```", llm_raw_output, re.DOTALL)
     json_string = ""
     if json_match:
@@ -86,17 +88,36 @@ User Request: {user_input}
         if parsed_output.get("action") == "call_tool":
             tool_name = parsed_output.get("tool_name")
             parameters = parsed_output.get("parameters", {})
-            ponumber = parameters.get("ponumber")
+            ponumber = parameters.get("ponumber") # Both tools use ponumber
 
             if tool_name == "cancel_po_main_record" and ponumber:
                 print(f"4. Detected Action: Call '{tool_name}' tool with PO Number: {ponumber}\n")
-                print("5. Executing Custom API Call (Admin Panel Job 'Cancel PO main record')...")
-                api_call_result = _call_admin_panel_job(CANCEL_PO_JOB_ID, {"ponumber": ponumber}, AUTH_TOKEN)
+                
+                # --- NEW: Chain both API calls for full PO cancellation ---
+                print("5a. Executing Custom API Call (Admin Panel Job 'Cancel PO main record')...")
+                api_call_main_result = _call_admin_panel_job(CANCEL_PO_MAIN_JOB_ID, {"ponumber": ponumber}, AUTH_TOKEN)
+                print(f"6a. API Call Result (Main PO): {api_call_main_result}\n")
+
+                print("5b. Executing Custom API Call (Admin Panel Job 'Cancel PO quantity')...")
+                api_call_quantity_result = _call_admin_panel_job(CANCEL_PO_QUANTITY_JOB_ID, {"ponumber": ponumber}, AUTH_TOKEN)
+                print(f"6b. API Call Result (PO Quantity): {api_call_quantity_result}\n")
+                
+                # Formulate a concise final response based on both API results
+                final_response_message = (
+                    f"Purchase Order {ponumber} has been successfully processed for full cancellation (main record and quantity). "
+                    f"Main PO status: {api_call_main_result}. Quantity status: {api_call_quantity_result}."
+                )
+                print(f"7. Final Response to User:\n   \"{final_response_message}\"")
+            
+            elif tool_name == "cancel_po_quantity" and ponumber:
+                print(f"4. Detected Action: Call '{tool_name}' tool with PO Number: {ponumber}\n")
+                print("5. Executing Custom API Call (Admin Panel Job 'Cancel PO quantity')...")
+                api_call_result = _call_admin_panel_job(CANCEL_PO_QUANTITY_JOB_ID, {"ponumber": ponumber}, AUTH_TOKEN)
                 print(f"\n6. API Call Result:\n   {api_call_result}\n")
                 
-                # Concise final response
-                final_response_message = f"Purchase Order {ponumber} has been successfully processed for cancellation."
+                final_response_message = f"The quantity for Purchase Order {ponumber} has been successfully processed for cancellation/adjustment."
                 print(f"7. Final Response to User:\n   \"{final_response_message}\"")
+
             else:
                 print("   LLM requested an unknown tool or missing parameters in JSON.")
                 print(f"\nFinal Response: I'm sorry, I couldn't process that request as the tool or parameters were not recognized.")
@@ -125,7 +146,7 @@ if __name__ == "__main__":
         print("\033[91mERROR: Please update AUTH_TOKEN in langchain_tools.py before running this script.\033[0m")
         exit()
 
-    # --- DEMONSTRATION SCENARIO ---
-    # This simulates a user's request (e.g., from a ServiceNow ticket description).
-    demo_user_request = "I need to cancel Purchase Order number 803080. Can you please process this?"
-    process_user_request_for_demo(demo_user_request)
+    # --- DEMONSTRATION SCENARIOS ---
+    # Scenario 1: Full PO Cancellation (now triggers both main and quantity cancellation)
+    demo_user_request_1 = "I need to cancel Purchase Order number 803080. Can you please process this?"
+    process_user_request_for_demo(demo_user_request_1)

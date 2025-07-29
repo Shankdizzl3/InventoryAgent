@@ -13,7 +13,7 @@ API_JOB_RUN_ENDPOINT = f"{API_BASE_URL}/job/run"
 # This token will be used by the tool when called.
 AUTH_TOKEN = "f58a1284-720c-4836-9546-b862d43ccfe2" # Ensure this is your actual token
 
-# --- Define the API Call Function ---
+# --- Define the API Call Function (Generic Admin Panel Job Runner) ---
 def _call_admin_panel_job(job_id: int, params: dict, auth_token: str) -> str:
     """
     Internal function to make the actual HTTP POST request to the Admin Panel API.
@@ -41,7 +41,9 @@ def _call_admin_panel_job(job_id: int, params: dict, auth_token: str) -> str:
 
         # As observed, the API returns an empty body on success (HTTP 200)
         # We'll return a success message that the LLM can understand.
-        return f"Successfully executed Admin Panel job ID {job_id} for PO number {params.get('ponumber')}. Status: {response.status_code} OK."
+        # Check if ponumber is in params to make the message more generic
+        po_num_info = f" for PO number {params.get('ponumber')}" if 'ponumber' in params else ""
+        return f"Successfully executed Admin Panel job ID {job_id}{po_num_info}. Status: {response.status_code} OK."
 
     except requests.exceptions.HTTPError as e:
         error_message = f"HTTP Error {e.response.status_code}: {e.response.text}"
@@ -65,44 +67,64 @@ def _call_admin_panel_job(job_id: int, params: dict, auth_token: str) -> str:
         return f"An internal error occurred while trying to call the API: {e}"
 
 
-# --- Define the Input Schema for the LangChain Tool ---
+# --- Input Schema for Cancel PO Main Record Tool ---
 class CancelPOInput(BaseModel):
     """Input for the cancel_po_main_record tool."""
     ponumber: str = Field(description="The Purchase Order number to be cancelled. This must be a string consisting of digits.")
 
-# --- Define the LangChain Tool using the @tool decorator ---
+# --- Define the LangChain Tool: Cancel PO Main Record ---
 @tool("cancel_po_main_record", args_schema=CancelPOInput)
 def cancel_po_main_record(ponumber: str) -> str:
     """
-    Cancels a Purchase Order (PO) in the PurchaseOrderMain system.
-    Use this tool when a user explicitly requests to cancel a PO and provides a PO number.
+    Cancels an entire Purchase Order (PO) in the PurchaseOrderMain system.
+    Use this tool when a user explicitly requests to cancel an entire PO and provides a PO number.
     The PO number must be a string of digits.
     """
-    # The job ID for "Cancel PO main record" from your provided image
-    job_id = 4
-    params = {"ponumber": ponumber}
+    job_id = 4 # Job ID for "Cancel PO main record"
+    params = {"ponumber": ponumber.strip()}
     return _call_admin_panel_job(job_id, params, AUTH_TOKEN)
 
-# --- Example of how to use the tool (for testing this script directly) ---
-if __name__ == "__main__":
-    print("--- Testing LangChain Tool Directly ---")
 
-    # IMPORTANT: Use a test PO number that is valid for cancellation in your IR environment.
-    # Ensure this PO number is a string.
-    test_po_for_tool = "803080" # Example, replace with a real test PO number
+# --- NEW: Input Schema for Cancel PO Quantity Tool ---
+class CancelPOQuantityInput(BaseModel):
+    """Input for the cancel_po_quantity tool."""
+    ponumber: str = Field(description="The Purchase Order number for which to cancel/update the quantity. This must be a string consisting of digits.")
+    # If the quantity itself is a parameter for this job, you would add it here:
+    # quantity_to_cancel: int = Field(description="The quantity to cancel for the specified PO.")
+
+# --- NEW: Define the LangChain Tool: Cancel PO Quantity ---
+@tool("cancel_po_quantity", args_schema=CancelPOQuantityInput)
+def cancel_po_quantity(ponumber: str) -> str:
+    """
+    Cancels or updates the quantity of items for a specific Purchase Order (PO) in the system.
+    This tool is used when the user wants to adjust the quantity of an existing PO, often setting it to zero.
+    Use this when the user mentions cancelling a quantity or reducing items for a PO.
+    The PO number must be a string of digits.
+    """
+    job_id = 6 # Job ID for "Cancel PO quantity" from your image
+    params = {"ponumber": ponumber.strip()}
+    # If the job requires a specific quantity parameter, you'd include it here, e.g.:
+    # params = {"ponumber": ponumber.strip(), "quantity": quantity_to_cancel}
+    return _call_admin_panel_job(job_id, params, AUTH_TOKEN)
+
+
+# --- Example of how to use the tools (for testing this script directly) ---
+if __name__ == "__main__":
+    print("--- Testing LangChain Tools Directly ---")
 
     if AUTH_TOKEN == "YOUR_BEARER_TOKEN_HERE":
         print("\033[91mPlease update AUTH_TOKEN in the script before running.\033[0m")
     else:
-        print(f"Calling cancel_po_main_record tool with PO: {test_po_for_tool}")
-        result = cancel_po_main_record.run(test_po_for_tool)
-        print("\nTool Execution Result:")
-        print(result)
+        # Test Cancel PO Main Record
+        test_po_main = "803080"
+        print(f"\nCalling cancel_po_main_record tool with PO: {test_po_main}")
+        result_main = cancel_po_main_record.run(test_po_main)
+        print("Tool Execution Result (Main PO Cancellation):")
+        print(result_main)
 
-        # Example of a prompt that might trigger this tool (for conceptual understanding)
-        print("\n--- Example Prompt for LLM ---")
-        print("User: I need to cancel PO number 803080. Can you do that?")
-        print("LLM (thinking): The user wants to cancel a PO. I have a tool 'cancel_po_main_record' that can do this. It requires a 'ponumber'. The user provided '803080'.")
-        print("LLM (calling tool): cancel_po_main_record(ponumber='803080')")
-        print("LLM (receiving output): Successfully executed Admin Panel job ID 4 for PO number 803080. Status: 200 OK.")
-        print("LLM (responding): I have successfully initiated the cancellation for PO number 803080.")
+        # Test Cancel PO Quantity
+        test_po_quantity = "803080" # Use a test PO number for quantity cancellation
+        print(f"\nCalling cancel_po_quantity tool with PO: {test_po_quantity}")
+        result_quantity = cancel_po_quantity.run(test_po_quantity)
+        print("Tool Execution Result (PO Quantity Cancellation):")
+        print(result_quantity)
