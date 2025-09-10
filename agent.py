@@ -1,54 +1,37 @@
 import requests
 import json
 import re
+import inventory_tools
 
 # --------------------------------------------------------------------------
 # --- 1. CONFIGURATION ---
 # --------------------------------------------------------------------------
 
 LLM_SERVER_URL = "http://localhost:8000/completion"
-N_PREDICT = 1024
-TEMPERATURE = 0.2
+N_PREDICT = 512 # Reduced as the task is simpler
+TEMPERATURE = 0.1
 TOP_P = 0.9
 STOP_TOKENS = ["<|end|>", "```"]
 
 # --------------------------------------------------------------------------
-# --- 2. AGENT'S SYSTEM PROMPT & IDENTITY ---
+# --- 2. AGENT'S NEW, SIMPLIFIED PROMPT ---
 # --------------------------------------------------------------------------
 
-# UPDATED: Added a 'JSON Response Format' section with a clear example
-# to give the model a better template and reduce syntax errors.
-SYSTEM_PROMPT = """You are a proactive Inventory Management Agent. Your task is to audit system logs, identify critical inventory discrepancies, and provide a detailed analysis followed by the precise, structured tool calls needed for a resolution.
+SYSTEM_PROMPT = """You are a data retrieval assistant for an inventory system. Your sole purpose is to use the provided tool to fetch transaction data for a given part number.
 
 **Available Tools:**
-- `check_product_status(product_id: str)`: Retrieves the full inventory record for a given product ID.
-- `adjust_quantity(product_id: str, new_quantity: int)`: Adjusts the inventory quantity for a specific product.
-- `resolve_transaction(transaction_id: str)`: Re-processes a transaction that is flagged as 'stuck'.
-- `update_product_data(product_id: str, field: str, new_value: str)`: Updates a specific field in the product's master data record.
+- `get_transactions_for_part(part_number: str)`: Retrieves all transaction records from the IntegrationTransactions table for a specific part number.
 
 **Instructions:**
-1. Analyze the provided "System Report" to identify all issues.
-2. Provide a step-by-step "Analysis" of the problems, explaining your reasoning.
-3. Generate a JSON object of "Tool Calls".
-4. Your entire response must be a single, valid JSON object.
+- Based on the user's request, generate the single, correct `tool_calls` JSON object needed to run the tool.
 
 **JSON Response Format:**
 ```json
 {
-  "analysis": "Your detailed, step-by-step reasoning goes here.",
   "tool_calls": [
     {
-      "function": "tool_name_1",
-      "arguments": {
-        "param1": "value1"
-      }
-    },
-    {
-      "function": "tool_name_2",
-      "arguments": {
-        "param1": "value1",
-        "param2": "value2"
-      }
+      "function": "get_transactions_for_part",
+      "arguments": { "part_number": "THE_PART_NUMBER_HERE" }
     }
   ]
 }
@@ -58,100 +41,95 @@ SYSTEM_PROMPT = """You are a proactive Inventory Management Agent. Your task is 
 """
 
 # --------------------------------------------------------------------------
-# --- 3. SIMULATED SYSTEM DATA (THE AGENT'S "INPUT") ---
+# --- 3. CORE AGENT LOGIC ---
 # --------------------------------------------------------------------------
 
-system_report = """
-System Report:
-- Product ID 'PROD-12345' in 'MAIN-WH' is reporting a negative quantity of -5.
-- Transaction 'TXN-98765' has been flagged as 'stuck' for 48 hours.
-- The last audit of product 'PROD-67890' showed a supplier ID 'SUP-OLD' that does not match the master record 'SUP-NEW'.
-"""
-
-# --------------------------------------------------------------------------
-# --- 4. CORE AGENT LOGIC ---
-# --------------------------------------------------------------------------
-
-def query_llm(prompt: str) -> dict:
+def query_llm_for_tool_call(user_request: str) -> dict:
     """
-    Sends a prompt to the LLM server and returns the parsed JSON response.
+    Sends a user request to the LLM and expects a tool call plan in return.
     """
-    headers = {"Content-Type": "application/json"}
-    data = {
-        "prompt": prompt,
-        "n_predict": N_PREDICT,
-        "temperature": TEMPERATURE,
-        "top_p": TOP_P,
-        "stop": STOP_TOKENS,
-    }
-
-    print("--- Sending Prompt to LLM Server ---")
-    print(prompt)
-    print("------------------------------------")
-
-    try:
-        response = requests.post(LLM_SERVER_URL, headers=headers, data=json.dumps(data), timeout=120)
-        response.raise_for_status()
-
-        result = response.json()
-        llm_content = result.get('content', '').strip()
-
-        print("\n--- Received Raw Response from LLM ---")
-        print(llm_content)
-        print("--------------------------------------\n")
-
-        # UPDATED: More robust JSON cleaning logic. It now finds the first '{'
-        # and the last '}' to better isolate the JSON object.
-        match = re.search(r'\{.*\}', llm_content, re.DOTALL)
-        if not match:
-            print("ERROR: No valid JSON object found in the response.")
-            return None
-        
-        json_string = match.group(0)
-
-        return json.loads(json_string)
-
-    except requests.exceptions.RequestException as e:
-        print(f"ERROR: An error occurred while communicating with the LLM server: {e}")
-        return None
-    except json.JSONDecodeError as e:
-        print(f"ERROR: Failed to decode JSON from LLM response after cleaning.")
-        print(f"       Problematic string was: '{json_string}'")
-        return None
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}")
-        return None
-
-
-def run_agent_cycle():
-    """
-    Executes one full cycle of the agent's workflow.
-    """
-    print("==============================================")
-    print("= INITIATING PROACTIVE INVENTORY AUDIT CYCLE =")
-    print("==============================================\n")
-
     full_prompt = (
         f"<|system|>\n{SYSTEM_PROMPT}<|end|>\n"
-        f"<|user|>\n{system_report}<|end|>\n"
+        f"<|user|>\n{user_request}<|end|>\n"
         f"<|assistant|>\n"
         "```json\n"
     )
 
-    structured_response = query_llm(full_prompt)
+    headers = {"Content-Type": "application/json"}
+    data = {
+        "prompt": full_prompt, "n_predict": N_PREDICT, "temperature": TEMPERATURE,
+        "top_p": TOP_P, "stop": STOP_TOKENS,
+    }
 
-    if structured_response:
-        print("--- Successfully Parsed LLM Output ---")
-        print(json.dumps(structured_response, indent=2))
-        print("--------------------------------------\n")
-        print("AGENT CYCLE COMPLETE: Ready for next phase (Tool Execution).")
+    print("--- Sending Prompt to LLM to generate tool call ---")
+    try:
+        response = requests.post(LLM_SERVER_URL, headers=headers, data=json.dumps(data), timeout=120)
+        response.raise_for_status()
+        result = response.json()
+        llm_content = result.get('content', '').strip()
+
+        print("--- Received Raw Response from LLM ---")
+        print(llm_content)
+        
+        match = re.search(r'\{.*\}', llm_content, re.DOTALL)
+        if not match: return None
+        return json.loads(match.group(0))
+
+    except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
+        print(f"ERROR during LLM query: {e}")
+        return None
+
+def execute_tool_call(tool_call_plan: dict):
+    """
+    Executes the tool call plan generated by the LLM.
+    """
+    if not tool_call_plan or "tool_calls" not in tool_call_plan:
+        print("Invalid or empty tool call plan.")
+        return None
+
+    tool_to_run = tool_call_plan["tool_calls"][0]
+    function_name = tool_to_run.get("function")
+    arguments = tool_to_run.get("arguments", {})
+
+    if function_name == "get_transactions_for_part":
+        return inventory_tools.get_transactions_for_part(**arguments)
     else:
-        print("AGENT CYCLE FAILED: Could not get a valid structured response from the LLM.")
+        print(f"WARNING: Unknown tool '{function_name}' requested. Cannot execute.")
+        return None
+
+def run_retrieval(part_to_find: str):
+    """
+    Executes the simplified data retrieval workflow.
+    """
+    print("==============================================")
+    print(f"= STARTING DATA RETRIEVAL FOR PART: {part_to_find} =")
+    print("==============================================\n")
+
+    # Phase 1: Let the LLM generate the tool call
+    user_request = f"Please pull all transaction information for part number {part_to_find}."
+    llm_plan = query_llm_for_tool_call(user_request)
+
+    # Phase 2: Execute the generated tool call
+    if llm_plan:
+        db_results_json = execute_tool_call(llm_plan)
+        if db_results_json:
+            print("\n--- Final Database Results ---")
+            # Parse and re-print for clean formatting
+            print(json.dumps(json.loads(db_results_json), indent=2))
+            print("------------------------------")
+    else:
+        print("Failed to get a valid plan from the LLM.")
+
+    print("\n==========================")
+    print("= RETRIEVAL COMPLETE     =")
+    print("==========================\n")
 
 # --------------------------------------------------------------------------
-# --- 5. SCRIPT EXECUTION ---
+# --- 4. SCRIPT EXECUTION ---
 # --------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    run_agent_cycle()
+    # The part number the agent will look up.
+    part_to_investigate = "YOUR_TEST_PART_NUMBER" # <-- IMPORTANT: CHANGE THIS
+    run_retrieval(part_to_investigate)
 
