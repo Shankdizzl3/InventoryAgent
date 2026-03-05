@@ -172,8 +172,20 @@ async def run_agent(user_request: str):
 # --- 5. ENTRY POINT ---
 # --------------------------------------------------------------------------
 
+async def main():
+    print("Inventory Agent — type 'exit' or 'quit' to stop.\n")
+    while True:
+        try:
+            user_request = input("Query: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nExiting.")
+            break
+        if not user_request:
+            continue
+        if user_request.lower() in ("exit", "quit", "q"):
+            print("Exiting.")
+            break
+        await run_agent(user_request)
+
 if __name__ == "__main__":
-    part_to_investigate = "YOUR_TEST_PART_NUMBER"  # <-- Change this
-    asyncio.run(run_agent(
-        f"Pull all transaction information for part number {part_to_investigate}."
-    ))
+    asyncio.run(main())
