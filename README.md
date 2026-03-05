@@ -1,97 +1,81 @@
-# **LLM Agent Project Setup Guide**
+# InventoryAgent
 
-This document outlines the steps required to set up a local LLM server on a Windows machine using llama.cpp and a quantized model. This guide is for a CPU-based inference workflow.
+Inventory reconciliation toolset for field service operations.
+Finds maintenance ticket parts that failed to consume into GP, classifies root causes,
+and outputs findings to Excel for human review.
 
-### **Prerequisites**
+## Components
 
-You must have the following software installed before proceeding:
+| File | Purpose |
+|------|---------|
+| `audit.py` | **Primary tool.** Deterministic audit script — no LLM. Runs runbook queries, classifies errors, writes Excel report. |
+| `agent.py` | Interactive LLM agent (Ollama/phi4-mini) for ad-hoc SQL investigation. |
+| `mcp_client.py` | Async MCP client that proxies DB queries through the mssql-mcp-server. |
 
-1. **Git:** Used to clone the llama.cpp repository.  
-   * **Link:** [https://git-scm.com/download/win](https://git-scm.com/download/win)  
-2. **Visual Studio with C++ Build Tools:** Required to compile the llama.cpp C++ project.  
-   * **Link:** [https://visualstudio.microsoft.com/downloads/](https://visualstudio.microsoft.com/downloads/)  
-   * During installation, select the **"Desktop development with C++"** workload.  
-3. **CMake:** A cross-platform build system that helps generate the project files for Visual Studio.  
-   * **Link:** [https://cmake.org/download/](https://cmake.org/download/)  
-   * During installation, be sure to check the option to **"Add CMake to system PATH for all users."**
+## Prerequisites
 
-### **Step 1: Download the llama.cpp Repository**
+### 1. Ollama
 
-Open **Git Bash** and run the following command to download the project into your desired folder.
+```
+winget install Ollama.Ollama
+ollama pull phi4-mini
+ollama serve
+```
 
-git clone https://github.com/ggerganov/llama.cpp.git  
-cd llama.cpp
+### 2. MCP Server (mssql-mcp-server)
 
-### **Step 2: Download the Quantized Model**
+The MCP server is a separate Node.js project. Build it once:
 
-1. Navigate to the Hugging Face model page for the Phi-3 Mini GGUF model.  
-   * **Link:** [https://huggingface.co/microsoft/Phi-3-mini-128k-instruct-GGUF](https://www.google.com/search?q=https://huggingface.co/microsoft/Phi-3-mini-128k-instruct-GGUF)  
-2. Go to the **"Files and versions"** tab and download a suitable .gguf file (e.g., phi-3-mini-128k-instruct.Q4\_K\_M.gguf).  
-3. Place the downloaded model file into the llama.cpp/models directory.
+```
+cd path\to\mssql-mcp-server
+npm install
+npm run build
+```
 
-### **Step 3: Build the Project with CMake**
+Create its `.env` with your SQL Server credentials (see that repo's README).
 
-1. Open the **x64 Native Tools Command Prompt for VS** from the Start menu.  
-2. Navigate to the llama.cpp directory.  
-   cd C:\\Users\\mshank.GRANDRAPIDS\\Desktop\\llama.cpp
+### 3. Python dependencies
 
-3. Run the following commands to configure and build the project, ensuring we disable the cURL feature to avoid errors.  
-   mkdir build  
-   cd build  
-   cmake .. \-DLLAMA\_CURL=OFF  
-   cmake \--build . \--config Release
+```
+pip install -r requirements.txt
+```
 
-### **Step 4: Run the LLM Server**
+## Configuration
 
-The build process created a set of executables in the build/bin/Release folder. To run the LLM as an API server, use the llama-server.exe executable.
+Copy `.env.example` to `.env` and set:
 
-1. Navigate to the Release directory.  
-   cd build\\bin\\Release
+```
+MCP_SERVER_PATH=C:\path\to\mssql-mcp-server\dist\index.js
+OLLAMA_MODEL=phi4-mini
+OLLAMA_BASE_URL=http://localhost:11434
+```
 
-2. Move the model file (phi-3-mini-128k-instruct.Q4\_K\_M.gguf) into this directory.  
-3. Start the server on an available port (e.g., 8000).  
-   .\\llama-server.exe \-m phi-3-mini-128k-instruct.Q4\_K\_M.gguf \-c 2048 \--port 8000
+## Running the audit
 
-   * If port 8000 is in use, try another one (e.g., 8080, 8081).
+```
+python audit.py
+```
 
-### **Step 5: Interact with the Server via Python**
+Produces `audit_YYYYMMDD_HHMMSS.xlsx` in the project directory.
+- **Summary** tab: error category counts
+- **Detail** tab: one row per unconsumed ticket part with GP qty, deficit, and recommended action
 
-Once the server is running, you can use Python code to send requests to it.
+## Running the interactive agent
 
-1. Open a new terminal and install the requests library.  
-   pip install requests
+```
+python agent.py
+```
 
-2. Create a Python file (e.g., client.py) and add the following code, ensuring the url matches the port you used to start the server.  
-   import requests  
-   import json
+Type SQL questions in plain English. The agent translates to SQL, queries the DB via MCP,
+and summarizes results. Type `exit` to quit.
 
-   url \= "http://localhost:8000/completion"
+## Error categories (audit.py)
 
-   prompt \= "A support ticket has come in about a stuck inventory transaction. It says 'Product ID 12345 is showing a negative quantity in the main warehouse'. What would you do first to solve this?"
-
-   data \= {  
-       "prompt": prompt,  
-       "n\_predict": 256,  
-       "temperature": 0.8,  
-       "stop": \["\\n"\]  
-   }
-
-   headers \= {"Content-Type": "application/json"}
-
-   try:  
-       response \= requests.post(url, data=json.dumps(data), headers=headers)  
-       response.raise\_for\_status()
-
-       result \= response.json()
-
-       if 'content' in result:  
-           print("LLM Response:")  
-           print(result\['content'\])  
-       else:  
-           print("Unexpected response format:", result)
-
-   except requests.exceptions.RequestException as e:  
-       print(f"An error occurred: {e}")
-
-3. Run the Python script.  
-   python client.py  
+| Category | Meaning |
+|----------|---------|
+| `NOT_INTEGRATED` | No integration record exists — manually trigger consumption |
+| `STUCK_PROCESSING` | StatusID=5, stuck in processing — check IntercompanyTransactions |
+| `QTYFULFI` | Stock exists but allocated (ATYALLOC lock) — check SOP10200 + stuck RINV |
+| `QTY_SHORTAGE_RINV` | RINV removal caused shortage — Cycle Count + reprocess |
+| `QTY_SHORTAGE` | GP qty genuinely insufficient — investigate TINV/PINV history |
+| `OTHER` | Unrecognized error — manual review |
