@@ -1,22 +1,25 @@
 import pyodbc
 import json
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ==========================================================================
 # == INVENTORY AGENT - TOOL IMPLEMENTATIONS                             ==
 # ==========================================================================
 
 # --------------------------------------------------------------------------
-# --- 1. DATABASE CONFIGURATION (ACTION REQUIRED) ---
+# --- 1. DATABASE CONFIGURATION ---
 # --------------------------------------------------------------------------
-# IMPORTANT: Replace these placeholder values with your actual database
-# credentials. For production, use a secure method like environment
-# variables or a secrets manager instead of hardcoding them.
+# Credentials are loaded from a .env file in the project root.
+# Copy .env.example to .env and fill in your values.
 
-DB_SERVER = "YOUR_DATABASE_SERVER_NAME"
-DB_DATABASE = "Inventory"
-DB_USERNAME = "YOUR_USERNAME"
-DB_PASSWORD = "YOUR_PASSWORD"
-DB_DRIVER = "{ODBC Driver 17 for SQL Server}" # Common driver, adjust if needed
+DB_SERVER = os.getenv("DB_SERVER", "")
+DB_DATABASE = os.getenv("DB_DATABASE", "Inventory")
+DB_USERNAME = os.getenv("DB_USERNAME", "")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "")
+DB_DRIVER = os.getenv("DB_DRIVER", "{ODBC Driver 17 for SQL Server}")
 
 # Construct the connection string
 DB_CONNECTION_STRING = (

@@ -12,7 +12,7 @@ API_JOB_RUN_ENDPOINT = f"{API_BASE_URL}/job/run"
 # IMPORTANT: Replace 'YOUR_BEARER_TOKEN_HERE' with your actual Authorization Token.
 # In a production environment, you would load this securely (e.g., from environment variables,
 # a secrets manager, or a configuration file not committed to version control).
-AUTH_TOKEN = "0a31a57f-6615-42b5-9062-8b043770a52d"
+AUTH_TOKEN = os.getenv("ADMIN_API_TOKEN", "")  # Set ADMIN_API_TOKEN in your .env file
 
 def call_cancel_po_api(job_id: int, po_number: str, auth_token: str):
     """
