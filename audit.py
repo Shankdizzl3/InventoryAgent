@@ -13,6 +13,8 @@ Usage:
 import asyncio
 import json
 import os
+import textwrap
+from collections import Counter
 from datetime import datetime
 
 import openpyxl
@@ -24,56 +26,93 @@ import mcp_client
 load_dotenv()
 
 # ---------------------------------------------------------------------------
+# Verbose logging helpers
+# ---------------------------------------------------------------------------
+
+def log(msg: str):
+    print(msg, flush=True)
+
+def log_query(label: str, database: str, sql: str):
+    log(f"\n  [QUERY] {label}")
+    log(f"  [DB]    {database}")
+    for line in sql.splitlines():
+        log(f"          {line}")
+
+def log_result(rows: list, preview_cols: list[str] | None = None):
+    log(f"  [RESULT] {len(rows)} row(s) returned")
+    if rows and preview_cols:
+        for i, row in enumerate(rows[:3]):
+            vals = {k: row.get(k, "") for k in preview_cols if k in row}
+            log(f"           row[{i}]: {vals}")
+        if len(rows) > 3:
+            log(f"           ... ({len(rows) - 3} more rows)")
+
+# ---------------------------------------------------------------------------
 # Queries
 # ---------------------------------------------------------------------------
 
-# Step 1: Pull all unconsumed maintenance ticket parts.
-# Joins T2Online to get ticket/part context; OUTER APPLYs IntegrationTransactions
-# + IntegrationStatusLookup to capture the latest integration attempt.
-QUERY_UNCONSUMED = """
+# Step 0: Simple connectivity check
+QUERY_PING = "SELECT 1 AS ping"
+
+# Query 1a: FAILED/STUCK tickets — drive from IntegrationTransactions (small filtered set),
+# join outward to T2Online for part/ticket context.
+# Covers: STUCK_PROCESSING, QTY_SHORTAGE*, QTYFULFI, OTHER categories.
+# Status IDs excluded: 1=Success, 9=Cancelled.
+QUERY_FAILED_TMIN = textwrap.dedent("""
 SELECT
-    tcm.CallCompany                             AS Company,
-    tcm.CallID                                  AS TicketID,
-    tpm.PartsPartNumber                         AS PartNumber,
-    tpm.PartsQtyNeeded                          AS QuantityNeeded,
-    acq.AcqLocationCode                         AS Location,
-    ist.IslStatusID                             AS StatusID,
-    ist.IslStatusDescription                    AS StatusDescription,
-    it.ItGPDocID                                AS GPDocID,
-    it.ItLongError                              AS IntegrationError,
-    it.it_retry_count                           AS RetryCount,
-    it.ItPKey                                   AS IntegrationID
+    it.CompanyDatabaseName              AS Company,
+    tcp.TcaPKey                         AS TicketID,
+    it.TicketLineItemID                 AS PartLineID,
+    it.ItPartNumber                     AS PartNumber,
+    COALESCE(tcp.TcpQuantityOrdered, it.ItQty) AS QuantityNeeded,
+    it.ItOrigin                         AS Location,
+    ist.IsPKey                          AS StatusID,
+    ist.IsDescription                   AS StatusDescription,
+    it.ItGPDocID                        AS GPDocID,
+    it.ItLongError                      AS IntegrationError,
+    it.it_retry_count                   AS RetryCount,
+    it.ItPKey                           AS IntegrationID
+FROM Inventory.dbo.IntegrationTransactions it
+JOIN Inventory.dbo.IntegrationStatusLookup ist
+    ON ist.IsPKey = it.ItIntegrationStatusID
+LEFT JOIN T2Online.dbo.TicketPartsMain tcp
+    ON tcp.TcpPKey = it.TicketLineItemID
+WHERE it.ItGPDocID LIKE 'TMIN%'
+  AND it.ItIntegrationStatusID NOT IN (1, 9)
+  AND ISNULL(tcp.TcpConsumed, 0) = 0
+""").strip()
+
+# Query 1b: NOT_INTEGRATED tickets — parts in T2Online with no TMIN record at all.
+# Scoped to last 90 days to avoid full-table scan on 1.1M-row TicketCallMain.
+QUERY_NOT_INTEGRATED = textwrap.dedent("""
+SELECT
+    'UNKNOWN'                       AS Company,
+    tcm.TcaPKey                     AS TicketID,
+    tcp.TcpPartNumber               AS PartNumber,
+    tcp.TcpQuantityOrdered          AS QuantityNeeded,
+    tcp.TcpInventoryLocation        AS Location,
+    NULL                            AS StatusID,
+    NULL                            AS StatusDescription,
+    NULL                            AS GPDocID,
+    NULL                            AS IntegrationError,
+    0                               AS RetryCount,
+    NULL                            AS IntegrationID
 FROM T2Online.dbo.TicketCallMain tcm
-JOIN T2Online.dbo.AgreeAgreementMain aam
-    ON aam.AgreementID = tcm.CallAgreementID
-JOIN T2Online.dbo.AcqAcquisitionLookup acq
-    ON acq.AcqAgreementID = aam.AgreementID
-JOIN T2Online.dbo.TicketPartsMain tpm
-    ON tpm.PartsCallID = tcm.CallID
-OUTER APPLY (
-    SELECT TOP 1
-        it2.ItPKey,
-        it2.ItGPDocID,
-        it2.ItLongError,
-        it2.ItIntegrationStatusID,
-        it2.it_retry_count
-    FROM Inventory.dbo.IntegrationTransactions it2
-    WHERE it2.ItGPDocID LIKE 'TMIN%'
-      AND it2.ItOrigin = acq.AcqLocationCode
-      AND it2.ItPartNumber = tpm.PartsPartNumber
-    ORDER BY it2.ItProcessDate DESC
-) it
-OUTER APPLY (
-    SELECT TOP 1 ist2.IslStatusID, ist2.IslStatusDescription
-    FROM Inventory.dbo.IntegrationStatusLookup ist2
-    WHERE ist2.IslStatusID = it.ItIntegrationStatusID
-) ist
-WHERE tpm.PartsConsumed = 0
-  AND tpm.PartsQtyNeeded > 0
-"""
+JOIN T2Online.dbo.TicketPartsMain tcp
+    ON tcp.TcaPKey = tcm.TcaPKey
+WHERE ISNULL(tcp.TcpConsumed, 0) = 0
+  AND ISNULL(tcp.TcpQuantityOrdered, 0) > 0
+  AND tcm.TcaCallDate >= DATEADD(day, -90, GETDATE())
+  AND NOT EXISTS (
+      SELECT 1
+      FROM Inventory.dbo.IntegrationTransactions it2
+      WHERE it2.TicketLineItemID = tcp.TcpPKey
+        AND it2.ItGPDocID LIKE 'TMIN%'
+  )
+""").strip()
 
 # Query 3: GP item-location qty for a specific part + location.
-QUERY_GP_QTY = """
+QUERY_GP_QTY = textwrap.dedent("""
 SELECT
     ITEMNMBR,
     LOCNCODE,
@@ -83,10 +122,10 @@ SELECT
 FROM IntegrationDB.dbo.IV00102
 WHERE ITEMNMBR = '{part}'
   AND LOCNCODE = '{location}'
-"""
+""").strip()
 
 # Query 7: Check for RINV removal records for a specific part + location.
-QUERY_RINV = """
+QUERY_RINV = textwrap.dedent("""
 SELECT
     ItPKey,
     ItGPDocID,
@@ -98,7 +137,7 @@ WHERE ItGPDocID LIKE 'RINV%'
   AND ItPartNumber = '{part}'
   AND ItOrigin = '{location}'
 ORDER BY ItProcessDate DESC
-"""
+""").strip()
 
 # ---------------------------------------------------------------------------
 # Classification
@@ -106,13 +145,15 @@ ORDER BY ItProcessDate DESC
 
 def classify(row: dict, gp_qty: dict, rinv_records: list) -> dict:
     """Map each ticket row to an error category + recommended action."""
-    error = row.get("IntegrationError") or ""
-    status = row.get("StatusID")
-    needed = row.get("QuantityNeeded") or 0
-    on_hand = gp_qty.get("QTYONHND", 0)
-    alloc = gp_qty.get("ATYALLOC", 0)
+    error    = row.get("IntegrationError") or ""
+    status   = row.get("StatusID")
+    needed   = row.get("QuantityNeeded") or 0
+    retries  = row.get("RetryCount") or 0
+    on_hand  = gp_qty.get("QTYONHND", 0)
+    alloc    = gp_qty.get("ATYALLOC", 0)
     available = on_hand - alloc
     location = row.get("Location", "")
+    high_retry = f" WARNING: High retry count ({retries}) — likely stuck for a long time." if retries >= 10 else ""
 
     if status is None:
         return {
@@ -129,36 +170,82 @@ def classify(row: dict, gp_qty: dict, rinv_records: list) -> dict:
     if "Quantity of part in ERP system is not enough" in error:
         deficit = max(0, needed - on_hand)
         if available >= needed:
-            return {
-                "category": "QTYFULFI",
-                "action": (
-                    f"Allocation lock. QTYONHND={on_hand}, ATYALLOC={alloc}. "
-                    "Check SOP10200 + Status 3 RINV records."
-                ),
-            }
+            if alloc > 0:
+                # Stock exists but tied up in allocation — genuine QTYFULFI lock
+                return {
+                    "category": "QTYFULFI",
+                    "action": (
+                        f"Allocation lock. QTYONHND={on_hand}, ATYALLOC={alloc}. "
+                        "Check SOP10200 + Status 3 RINV records."
+                    ),
+                }
+            else:
+                # GP has enough stock, no current allocation — stale failure, safe to reprocess
+                return {
+                    "category": "QTYFULFI_STALE",
+                    "action": (
+                        f"GP has sufficient stock (QTYONHND={on_hand}, ATYALLOC=0). "
+                        "Stale failure — reprocess directly."
+                    ),
+                }
         if rinv_records:
             return {
                 "category": "QTY_SHORTAGE_RINV",
                 "action": (
                     f"RINV removal likely caused shortage. Deficit={deficit}. "
-                    f"Cycle Count {deficit} unit(s) at {location}, then reprocess."
+                    f"Cycle Count {deficit} unit(s) at {location}, then reprocess.{high_retry}"
                 ),
             }
         return {
             "category": "QTY_SHORTAGE",
             "action": (
                 f"GP has {on_hand}, need {needed}, deficit={deficit}. "
-                f"Investigate TINV/PINV history. Likely Cycle Count {deficit} unit(s)."
+                f"Investigate TINV/PINV history. Likely Cycle Count {deficit} unit(s).{high_retry}"
             ),
         }
 
     if "QTYFULFI" in error or "QtyShrtOpt" in error:
+        if available < needed:
+            deficit = max(0, needed - on_hand)
+            return {
+                "category": "QTY_SHORTAGE",
+                "action": (
+                    f"GP has {on_hand}, need {needed}, deficit={deficit}. "
+                    f"QTYFULFI parameter error — investigate TINV/PINV history and Cycle Count.{high_retry}"
+                ),
+            }
+        if alloc > 0:
+            return {
+                "category": "QTYFULFI",
+                "action": (
+                    f"Allocation lock. QTYONHND={on_hand}, ATYALLOC={alloc}. "
+                    "Check SOP10200 + stuck Status 3 RINV."
+                ),
+            }
         return {
-            "category": "QTYFULFI",
+            "category": "QTYFULFI_STALE",
             "action": (
-                f"Allocation lock. QTYONHND={on_hand}, ATYALLOC={alloc}. "
-                "Check SOP10200 + stuck Status 3 RINV."
+                f"GP has sufficient stock (QTYONHND={on_hand}, ATYALLOC=0). "
+                "Stale QTYFULFI parameter error — reprocess directly."
             ),
+        }
+
+    if "Not safe to process" in error:
+        return {
+            "category": "NOT_SAFE",
+            "action": "Integration flagged as not safe to process. Review ticket state in Trakker and GP for inconsistency before reprocessing.",
+        }
+
+    if "open" in error.lower() and "consum" in error.lower():
+        return {
+            "category": "TICKET_OPEN",
+            "action": "Ticket is still open in Trakker — parts cannot be consumed until ticket is closed. Close or finalize the ticket, then reprocess.",
+        }
+
+    if "On Contract" in error or "move to existing location" in error:
+        return {
+            "category": "CONTRACT_LOCATION",
+            "action": "Part is on contract and must be moved to the contract-designated location. Verify correct location then reprocess.",
         }
 
     return {
@@ -171,12 +258,17 @@ def classify(row: dict, gp_qty: dict, rinv_records: list) -> dict:
 # MCP helpers
 # ---------------------------------------------------------------------------
 
-async def run_query(sql: str, database: str = "Inventory") -> list[dict]:
-    """Execute a SELECT via MCP and return list of row dicts."""
+async def run_query(label: str, sql: str, database: str = "Inventory") -> list[dict]:
+    """Execute a SELECT via MCP, log verbosely, and return list of row dicts."""
+    log_query(label, database, sql)
+
     raw = await mcp_client.call_tool("execute_query", {"query": sql, "database": database})
+    log(f"  [RAW]   {raw[:300]}{'...' if len(raw) > 300 else ''}")
+
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
+        log("  [WARN]  Could not parse response as JSON — returning empty")
         return []
 
     # MCP server may return {"rows": [...]} or a bare list
@@ -186,8 +278,8 @@ async def run_query(sql: str, database: str = "Inventory") -> list[dict]:
         for key in ("rows", "result", "data", "results"):
             if key in data and isinstance(data[key], list):
                 return data[key]
-        # Single-row dict
-        if any(k not in ("error",) for k in data):
+        # Single-row dict (e.g. SELECT 1)
+        if not data.get("error"):
             return [data]
     return []
 
@@ -200,13 +292,23 @@ HEADER_FILL = PatternFill("solid", fgColor="1F4E79")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
 
 CATEGORY_COLORS = {
-    "NOT_INTEGRATED":    "FFF2CC",
-    "STUCK_PROCESSING":  "FCE4D6",
-    "QTYFULFI":          "DDEBF7",
-    "QTY_SHORTAGE_RINV": "FFD7D7",
-    "QTY_SHORTAGE":      "FFD7D7",
-    "OTHER":             "EEEEEE",
+    "NOT_INTEGRATED":    "FFF2CC",  # yellow
+    "STUCK_PROCESSING":  "FCE4D6",  # orange
+    "QTYFULFI":          "DDEBF7",  # blue  — allocation lock, needs SOP10200 review
+    "QTYFULFI_STALE":    "D9EAD3",  # green — stock available, just reprocess
+    "QTY_SHORTAGE_RINV": "FFD7D7",  # red
+    "QTY_SHORTAGE":      "FFD7D7",  # red
+    "NOT_SAFE":          "EAD1DC",  # pink
+    "TICKET_OPEN":       "FFF2CC",  # yellow
+    "CONTRACT_LOCATION": "D9D9D9",  # grey
+    "OTHER":             "EEEEEE",  # light grey
 }
+
+CATEGORY_FILLS = {
+    cat: PatternFill("solid", fgColor=color)
+    for cat, color in CATEGORY_COLORS.items()
+}
+_DEFAULT_FILL = PatternFill("solid", fgColor="FFFFFF")
 
 
 def _header_row(ws, columns: list[str]):
@@ -218,6 +320,7 @@ def _header_row(ws, columns: list[str]):
 
 
 def write_excel(detail_rows: list[dict], filename: str):
+    log(f"\n[EXCEL] Building workbook with {len(detail_rows)} detail row(s)...")
     wb = openpyxl.Workbook()
 
     # --- Summary tab ---
@@ -225,10 +328,10 @@ def write_excel(detail_rows: list[dict], filename: str):
     ws_sum.title = "Summary"
     _header_row(ws_sum, ["ErrorCategory", "Count"])
 
-    from collections import Counter
     counts = Counter(r["ErrorCategory"] for r in detail_rows)
     for category, count in sorted(counts.items(), key=lambda x: -x[1]):
         ws_sum.append([category, count])
+        log(f"  {category}: {count}")
 
     ws_sum.column_dimensions["A"].width = 28
     ws_sum.column_dimensions["B"].width = 10
@@ -236,7 +339,7 @@ def write_excel(detail_rows: list[dict], filename: str):
     # --- Detail tab ---
     ws_det = wb.create_sheet("Detail")
     columns = [
-        "Company", "TicketID", "PartNumber", "QuantityNeeded", "Location",
+        "Company", "TicketID", "PartLineID", "PartNumber", "QuantityNeeded", "Location",
         "StatusID", "StatusDescription", "ErrorCategory",
         "GPQtyOnHand", "GPAllocated", "GPAvailable", "Deficit",
         "HasRINV", "RetryCount", "IntegrationError",
@@ -246,15 +349,12 @@ def write_excel(detail_rows: list[dict], filename: str):
 
     for row in detail_rows:
         ws_det.append([row.get(c, "") for c in columns])
-        # Color-code by category
-        color = CATEGORY_COLORS.get(row.get("ErrorCategory", "OTHER"), "FFFFFF")
-        fill = PatternFill("solid", fgColor=color)
+        fill = CATEGORY_FILLS.get(row.get("ErrorCategory", "OTHER"), _DEFAULT_FILL)
         for cell in ws_det[ws_det.max_row]:
             cell.fill = fill
 
-    # Auto-width (approximate)
     col_widths = {
-        "Company": 14, "TicketID": 14, "PartNumber": 18, "QuantityNeeded": 14,
+        "Company": 14, "TicketID": 14, "PartLineID": 12, "PartNumber": 18, "QuantityNeeded": 14,
         "Location": 12, "StatusID": 10, "StatusDescription": 22, "ErrorCategory": 22,
         "GPQtyOnHand": 14, "GPAllocated": 14, "GPAvailable": 14, "Deficit": 10,
         "HasRINV": 10, "RetryCount": 12, "IntegrationError": 40,
@@ -267,7 +367,7 @@ def write_excel(detail_rows: list[dict], filename: str):
     ws_det.freeze_panes = "A2"
 
     wb.save(filename)
-    print(f"Report written → {filename}")
+    log(f"\n[DONE] Report written → {filename}")
 
 
 # ---------------------------------------------------------------------------
@@ -275,73 +375,125 @@ def write_excel(detail_rows: list[dict], filename: str):
 # ---------------------------------------------------------------------------
 
 async def main():
-    print("=== Inventory Reconciliation Audit ===\n")
+    log("=== Inventory Reconciliation Audit ===\n")
 
-    # Step 1: Pull unconsumed tickets (query runs cross-DB; use T2Online as anchor)
-    print("Step 1: Pulling unconsumed maintenance ticket parts...")
-    tickets = await run_query(QUERY_UNCONSUMED, database="T2Online")
-    print(f"  Found {len(tickets)} unconsumed ticket parts.\n")
+    try:
+        # ------------------------------------------------------------------
+        # Step 0: Connectivity check
+        # ------------------------------------------------------------------
+        log("Step 0: Testing MCP server connectivity...")
+        ping = await run_query("Connectivity ping", QUERY_PING, database="Inventory")
+        log_result(ping)
+        if not ping:
+            log("\n[ERROR] MCP server returned no response to SELECT 1. Check MCP_SERVER_PATH and DB credentials.")
+            return
+        log("  MCP server is reachable.\n")
 
-    if not tickets:
-        print("Nothing to audit. Exiting.")
-        return
-
-    detail_rows = []
-
-    for i, row in enumerate(tickets, 1):
-        part = row.get("PartNumber", "")
-        location = row.get("Location", "")
-
-        if i % 20 == 0 or i == 1:
-            print(f"  Processing row {i}/{len(tickets)}...")
-
-        # Step 2a: GP qty check
-        gp_rows = await run_query(
-            QUERY_GP_QTY.format(part=part.replace("'", "''"), location=location.replace("'", "''")),
-            database="IntegrationDB",
+        # ------------------------------------------------------------------
+        # Step 1a+b: Run both main queries in parallel.
+        #   1a: Failed/stuck TMIN records from IntegrationTransactions (small set).
+        #   1b: NOT_INTEGRATED parts from T2Online (last 90 days, no TMIN record).
+        # ------------------------------------------------------------------
+        log("Step 1: Pulling failed/stuck TMIN records and NOT_INTEGRATED parts in parallel...")
+        failed_tickets, not_integrated = await asyncio.gather(
+            run_query("Failed/stuck TMIN records", QUERY_FAILED_TMIN, database="Inventory"),
+            run_query("NOT_INTEGRATED parts (last 90 days)", QUERY_NOT_INTEGRATED, database="T2Online"),
         )
-        gp_qty = gp_rows[0] if gp_rows else {}
+        log_result(failed_tickets, preview_cols=["Company", "TicketID", "PartNumber", "Location"])
+        log(f"  Found {len(failed_tickets)} failed/stuck ticket part(s).")
+        log_result(not_integrated, preview_cols=["TicketID", "PartNumber", "Location"])
+        log(f"  Found {len(not_integrated)} not-integrated ticket part(s).\n")
 
-        # Step 2b: RINV check
-        rinv_rows = await run_query(
-            QUERY_RINV.format(part=part.replace("'", "''"), location=location.replace("'", "''")),
-            database="Inventory",
-        )
+        tickets = failed_tickets + not_integrated
 
-        # Step 3: Classify
-        classification = classify(row, gp_qty, rinv_rows)
+        if not tickets:
+            log("\n[INFO] No actionable tickets found. All parts are either consumed or cancelled.")
+            return
 
-        on_hand = gp_qty.get("QTYONHND", 0)
-        alloc = gp_qty.get("ATYALLOC", 0)
-        needed = row.get("QuantityNeeded") or 0
-        deficit = max(0, needed - on_hand)
+        log(f"  Total to process: {len(tickets)} ticket part(s).\n")
 
-        detail_rows.append({
-            "Company":          row.get("Company", ""),
-            "TicketID":         row.get("TicketID", ""),
-            "PartNumber":       part,
-            "QuantityNeeded":   needed,
-            "Location":         location,
-            "StatusID":         row.get("StatusID", ""),
-            "StatusDescription": row.get("StatusDescription", ""),
-            "ErrorCategory":    classification["category"],
-            "GPQtyOnHand":      on_hand,
-            "GPAllocated":      alloc,
-            "GPAvailable":      on_hand - alloc,
-            "Deficit":          deficit,
-            "HasRINV":          "Yes" if rinv_rows else "No",
-            "RetryCount":       row.get("RetryCount", ""),
-            "IntegrationError": row.get("IntegrationError", ""),
-            "RecommendedAction": classification["action"],
-            "IntegrationID":    row.get("IntegrationID", ""),
-        })
+        # ------------------------------------------------------------------
+        # Step 2 + 3: Diagnose + classify each ticket
+        # ------------------------------------------------------------------
+        log(f"Step 2: Running GP qty + RINV diagnostics for each ticket...")
+        detail_rows = []
 
-    print(f"\nStep 3: Classified {len(detail_rows)} rows.\n")
+        for i, row in enumerate(tickets, 1):
+            company   = row.get("Company", "")
+            # TicketID = TicketCallMain.TcaPKey; falls back to PartLineID (TcpPKey)
+            # when the IT record predates TicketLineItemID tracking or T2Online join misses.
+            ticket    = row.get("TicketID") or row.get("PartLineID") or ""
+            part      = row.get("PartNumber", "")
+            location  = row.get("Location", "")
+            needed    = row.get("QuantityNeeded") or 0
+            part_line = row.get("PartLineID", "")
 
-    # Step 4: Write Excel
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = os.path.join(os.path.dirname(__file__), f"audit_{timestamp}.xlsx")
-    write_excel(detail_rows, filename)
+            log(f"\n  [{i}/{len(tickets)}] Company={company} Ticket={ticket} "
+                f"Part={part} Location={location} QtyNeeded={needed}")
+
+            # 2a+b: GP qty + RINV check in parallel (independent queries)
+            part_esc = part.replace("'", "''")
+            loc_esc  = location.replace("'", "''")
+            gp_rows, rinv_rows = await asyncio.gather(
+                run_query(
+                    f"GP qty — {part} @ {location}",
+                    QUERY_GP_QTY.format(part=part_esc, location=loc_esc),
+                    database="IntegrationDB",
+                ),
+                run_query(
+                    f"RINV check — {part} @ {location}",
+                    QUERY_RINV.format(part=part_esc, location=loc_esc),
+                    database="Inventory",
+                ),
+            )
+            log_result(gp_rows, preview_cols=["ITEMNMBR", "LOCNCODE", "QTYONHND", "ATYALLOC"])
+            log_result(rinv_rows, preview_cols=["ItGPDocID", "ItQty", "ItProcessDate"])
+            gp_qty = gp_rows[0] if gp_rows else {}
+
+            # 3: Classify
+            classification = classify(row, gp_qty, rinv_rows)
+            log(f"  [CLASSIFY] category={classification['category']}")
+            log(f"             action={classification['action']}")
+
+            on_hand = gp_qty.get("QTYONHND", 0)
+            alloc   = gp_qty.get("ATYALLOC", 0)
+            deficit = max(0, needed - on_hand)
+
+            detail_rows.append({
+                "Company":           company,
+                "TicketID":          ticket,
+                "PartLineID":        part_line,
+                "PartNumber":        part,
+                "QuantityNeeded":    needed,
+                "Location":          location,
+                "StatusID":          row.get("StatusID", ""),
+                "StatusDescription": row.get("StatusDescription", ""),
+                "ErrorCategory":     classification["category"],
+                "GPQtyOnHand":       on_hand,
+                "GPAllocated":       alloc,
+                "GPAvailable":       on_hand - alloc,
+                "Deficit":           deficit,
+                "HasRINV":           "Yes" if rinv_rows else "No",
+                "RetryCount":        row.get("RetryCount", ""),
+                "IntegrationError":  row.get("IntegrationError", ""),
+                "RecommendedAction": classification["action"],
+                "IntegrationID":     row.get("IntegrationID", ""),
+            })
+
+        log(f"\nStep 3: Classified {len(detail_rows)} row(s).\n")
+
+        # ------------------------------------------------------------------
+        # Step 4: Write Excel
+        # ------------------------------------------------------------------
+        log("Step 4: Writing Excel report...")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"audit_{timestamp}.xlsx")
+        write_excel(detail_rows, filename)
+
+    finally:
+        log("\n[MCP] Closing server connection...")
+        await mcp_client.close_session()
+        log("[MCP] Connection closed.")
 
 
 if __name__ == "__main__":

@@ -52,6 +52,18 @@ async def get_session() -> ClientSession:
     return _session
 
 
+async def close_session() -> None:
+    """Close the MCP session and kill the Node.js subprocess cleanly."""
+    global _session, _exit_stack
+    if _exit_stack is not None:
+        try:
+            await _exit_stack.aclose()
+        except Exception:
+            pass
+    _session = None
+    _exit_stack = None
+
+
 async def call_tool(name: str, arguments: dict) -> str:
     """
     Calls a named MCP tool with the given arguments and returns
