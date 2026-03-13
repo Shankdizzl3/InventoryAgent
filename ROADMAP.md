@@ -41,18 +41,22 @@ Admin Panel integration is trusted and fully tested.
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        InventoryAgent                        │
-│                                                              │
-│  audit.py          ──► deterministic detection engine        │
-│  agent.py          ──► LLM investigation & fix proposal      │
-│  mcp_client.py     ──► DB access via mssql-mcp-server (MCP)  │
-│                                                              │
-│  Runtime: Ollama (phi4-mini, local CPU)                      │
-│  DB: SQL Server — T2Online, Inventory, IntegrationDB         │
-│  Output: Excel (audit + staged fix queries)                  │
-│  Future: Admin Panel API (write-back execution)              │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                         InventoryAgent                            │
+│                                                                   │
+│  audit.py           ──► deterministic detection + classification  │
+│  investigate.py     ──► guided LLM investigation per row          │
+│  evidence.py        ──► evidence queries + fast-path rules        │
+│  llm_utils.py       ──► shared Ollama client + verdict parser     │
+│  playbooks/*.txt    ──► category decision trees for LLM           │
+│  agent.py           ──► interactive ad-hoc SQL investigation      │
+│  mcp_client.py      ──► DB access via mssql-mcp-server (MCP)     │
+│                                                                   │
+│  Runtime: Ollama (phi4-mini, local CPU)                           │
+│  DB: SQL Server — T2Online, Inventory, IntegrationDB              │
+│  Output: Excel (audit + investigation)                            │
+│  Future: Admin Panel API (write-back execution)                   │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ### Data flow (current)
@@ -60,23 +64,24 @@ Admin Panel integration is trusted and fully tested.
 SQL Server ──► mcp_client.py ──► audit.py ──► audit_YYYYMMDD.xlsx
                                                ├── Summary tab
                                                ├── Detail tab (213 rows, color-coded)
-                                               └── [Staged Fixes tab — Phase 2]
+                                               └── Staged Fixes tab (auto-fixable rows)
+                                                        │
+                                                        ▼
+                                              investigate.py (Phase 4)
+                                               ├── evidence.py (parallel SQL)
+                                               ├── playbooks/*.txt (decision trees)
+                                               ├── fast-path (deterministic confirm)
+                                               └── LLM (phi4-mini verdict)
+                                                        │
+                                                        ▼
+                                              investigation_YYYYMMDD.xlsx
+                                               ├── Investigation Summary tab
+                                               └── Investigation Detail tab
 ```
 
 ### Data flow (target)
 ```
-SQL Server ──► audit.py (continuous) ──► classify ──► propose fix SQL
-                    │                                       │
-                    └──► agent.py (LLM investigation) ◄────┘
-                                   │
-                                   ▼
-                         Staged Fixes Excel (DBA review)
-                                   │
-                                   ▼ (approved)
-                         Admin Panel API endpoints
-                                   │
-                                   ▼
-                         SQL Server (write-back executed)
+audit.py ──► investigate.py ──► DBA review ──► Admin Panel API ──► SQL Server
 ```
 
 ---
