@@ -1,0 +1,19 @@
+CATEGORY: NOT_SAFE
+FIX_TYPE: HUMAN_ACTION
+
+CONTEXT: The integration engine flagged this record as "Not safe to process." This means Trakker and GP state are inconsistent in a way the engine cannot resolve automatically.
+
+EVIDENCE PROVIDED:
+- GP qty: current QTYONHND, ATYALLOC, QTYCOMTD
+- Trakker qty: IqtQtyOnHand, IqtQtyConsume
+- Recent IT records: last 5 integration transactions for this part+location
+
+DECISION TREE:
+1. If GP and Trakker quantities match AND ATYALLOC = 0 AND no recent failures → RECLASSIFY as QTYFULFI_STALE (state looks consistent now — may be safe to retry)
+2. If multiple failed records exist for same part → ESCALATE (pattern of failures — needs deeper investigation)
+3. Otherwise → CONFIRM human review needed
+
+OUTPUT FORMAT (exactly 3 lines):
+verdict: CONFIRM|ESCALATE|RECLASSIFY
+reason: <one sentence explaining why>
+new_category: <only if RECLASSIFY, otherwise omit>

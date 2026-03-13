@@ -1,7 +1,7 @@
 # InventoryAgent — Project Roadmap & Goals
 
 **Last updated**: 2026-03-12
-**Current phase**: Phase 2 — Fix Query Generation
+**Current phase**: Phase 4 — LLM Investigation Layer (COMPLETE)
 
 ---
 
@@ -160,27 +160,14 @@ SQL Server ──► audit.py (continuous) ──► classify ──► propose 
 
 ---
 
-### Phase 2 — Fix Query Generation 🔄 NEXT
+### Phase 2 — Fix Query Generation ✅ COMPLETE
 > *For each classified failure, generate the exact SQL fix query. Stage it in Excel for DBA review.*
 
-**Goal**: The Excel output gains a `Staged Fixes` tab. DBA reviews the proposed SQL, gets it
-approved, and submits it to Admin Panel. This is the bridge until Admin Panel panels are built.
-
-**Deliverables**:
-- [ ] `ItProcessDate` added to QUERY_FAILED_TMIN SELECT — pulled into Detail tab
-- [ ] `DaysOpen` calculated column (today − ItProcessDate) — age-based prioritization
-- [ ] `generate_fix_sql(row)` function mapping each category to a SQL statement:
-  - **QTYFULFI_STALE**: `UPDATE Inventory.dbo.IntegrationTransactions SET ItIntegrationStatusID = 4 WHERE ItPKey = {IntegrationID}`
-  - **STUCK_PROCESSING**: Same UPDATE — reset to Pending
-  - **QTY_SHORTAGE / QTY_SHORTAGE_RINV**: Cycle Count INSERT + reset to Pending (exact INSERT TBD with DBA)
-  - **TICKET_OPEN / NOT_SAFE / CONTRACT_LOCATION / OTHER**: No SQL — human action flag only
-- [ ] `Staged Fixes` tab in Excel output:
-  - Columns: Company, TicketID, PartLineID, PartNumber, Location, ErrorCategory, DaysOpen, FixType, ProposedSQL
-  - Auto-fixable rows only (excludes human-action categories)
-  - Sorted by DaysOpen descending (oldest first)
-- [ ] Summary tab updated with proposed fix counts by category
-
-**Non-goals for this phase**: Executing the SQL. Output only.
+- [x] `ItProcessDate` added to QUERY_FAILED_TMIN SELECT — pulled into Detail tab
+- [x] `DaysOpen` calculated column (today − ItProcessDate) — age-based prioritization
+- [x] `Staged Fixes` tab in Excel: Company, TicketID, PartLineID, PartNumber, Location, ErrorCategory, DaysOpen, FixType
+- [x] Auto-fixable rows only, sorted by DaysOpen descending (oldest first)
+- [x] Summary tab updated with FixType triage counts
 
 ---
 
@@ -197,16 +184,16 @@ approved, and submits it to Admin Panel. This is the bridge until Admin Panel pa
 
 ---
 
-### Phase 4 — LLM Investigation Layer
-> *Wire the LLM agent into the audit results so it can investigate ambiguous failures and refine fix proposals.*
+### Phase 4 — LLM Investigation Layer ✅ COMPLETE
+> *"Guided Investigation" pattern: deterministic evidence gathering + LLM verdict interpretation.*
 
-**Deliverables**:
-- [ ] `agent.py` loads most recent audit output as context on startup
-- [ ] LLM can investigate specific IntegrationIDs, parts, or locations on request
-- [ ] LLM proposes fix SQL for `OTHER` and `NOT_SAFE` rows via multi-turn investigation
-- [ ] Agent queries GP qty, RINV history, SOP10200 as needed to build case
-- [ ] Agent-proposed fix queries written to Staged Fixes tab alongside deterministic ones
-- [ ] Model upgrade path: phi4-mini → Qwen2.5-7B when hardware allows
+- [x] `llm_utils.py` — shared Ollama client, single-turn call, verdict parser
+- [x] `evidence.py` — per-category SQL queries, parallel gathering via MCP, fast-path rules, evidence formatting
+- [x] `playbooks/` — 10 category-specific decision trees (~400 tokens each)
+- [x] `investigate.py` — orchestrator: reads audit Excel → gathers evidence → fast-path/LLM → writes investigation Excel
+- [x] Fast-path for QTYFULFI_STALE + STUCK_PROCESSING (skips LLM when evidence is unambiguous)
+- [x] `agent.py` tool definitions fixed to support all 3 databases (was hardcoded to Inventory)
+- [x] `agent.py` refactored to import from `llm_utils.py`
 
 ---
 

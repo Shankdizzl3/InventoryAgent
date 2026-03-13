@@ -1,0 +1,20 @@
+CATEGORY: OTHER
+FIX_TYPE: HUMAN_ACTION
+
+CONTEXT: The error message did not match any known pattern. This record needs manual investigation.
+
+EVIDENCE PROVIDED:
+- GP qty: current QTYONHND, ATYALLOC, QTYCOMTD
+- Recent IT records: last 5 integration transactions for this part+location (with error text)
+
+DECISION TREE:
+1. If the error text contains "Quantity" or "QTYFULFI" → RECLASSIFY as QTY_SHORTAGE or QTYFULFI_STALE (known pattern the classifier missed)
+2. If the error text contains "open" and "ticket" → RECLASSIFY as TICKET_OPEN
+3. If the error text contains "Not safe" → RECLASSIFY as NOT_SAFE
+4. If GP has stock and no allocation → ESCALATE (may be safe to retry but error is unknown)
+5. Otherwise → CONFIRM manual review needed
+
+OUTPUT FORMAT (exactly 3 lines):
+verdict: CONFIRM|ESCALATE|RECLASSIFY
+reason: <one sentence explaining why>
+new_category: <only if RECLASSIFY, otherwise omit>

@@ -1,0 +1,21 @@
+CATEGORY: QTY_SHORTAGE_RINV
+FIX_TYPE: CYCLE_COUNT_TBD
+
+CONTEXT: GP does not have enough stock, and RINV (removal) records exist for this part+location. The removal likely caused the shortage. The proposed fix is a Cycle Count adjustment for the deficit, then reset to Pending.
+
+EVIDENCE PROVIDED:
+- GP qty: current QTYONHND, ATYALLOC, QTYCOMTD from IV00102
+- Trakker qty: IqtQtyOnHand, IqtQtyConsume
+- RINV detail: recent removal records with status and date
+
+DECISION TREE:
+1. If GP QTYONHND >= QuantityNeeded now → RECLASSIFY as QTYFULFI_STALE (stock recovered — just reprocess)
+2. If RINV records have StatusID=3 (Failed Batch) → ESCALATE (failed batch RINV may have left ATYALLOC stuck — needs coordinated fix)
+3. If Trakker OnHand agrees with GP (both short) → CONFIRM cycle count (both systems agree, just add stock)
+4. If Trakker OnHand > GP → CONFIRM cycle count (Trakker has stock GP doesn't — cycle count corrects the mismatch)
+5. Otherwise → CONFIRM cycle count for deficit quantity
+
+OUTPUT FORMAT (exactly 3 lines):
+verdict: CONFIRM|ESCALATE|RECLASSIFY
+reason: <one sentence explaining why>
+new_category: <only if RECLASSIFY, otherwise omit>

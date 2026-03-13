@@ -1,0 +1,20 @@
+CATEGORY: QTYFULFI
+FIX_TYPE: HUMAN_ACTION
+
+CONTEXT: Genuine allocation lock — GP has sufficient QTYONHND but ATYALLOC > 0, meaning stock is tied up by another process (sales order, failed batch, etc.). The consumption cannot proceed until the allocation is released.
+
+EVIDENCE PROVIDED:
+- GP qty: current QTYONHND, ATYALLOC, QTYCOMTD
+- Open sales orders: SOP10200 rows for this part+location
+- Status-3 RINVs: Failed Batch RINV records that may have caused stuck ATYALLOC
+
+DECISION TREE:
+1. If ATYALLOC = 0 now → RECLASSIFY as QTYFULFI_STALE (allocation was released — safe to reprocess)
+2. If SOP10200 has open orders accounting for the allocation → CONFIRM human action (wait for sales order to ship or be cancelled)
+3. If Status-3 RINV records exist → ESCALATE (Failed Batch RINV likely caused stuck allocation — needs batch cleanup)
+4. If ATYALLOC > 0 but no SOP orders and no Status-3 RINVs → ESCALATE (orphaned allocation — needs GP investigation)
+
+OUTPUT FORMAT (exactly 3 lines):
+verdict: CONFIRM|ESCALATE|RECLASSIFY
+reason: <one sentence explaining why>
+new_category: <only if RECLASSIFY, otherwise omit>

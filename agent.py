@@ -1,22 +1,14 @@
 import ast
 import asyncio
 import json
-import os
 import re
 
-import ollama
-from dotenv import load_dotenv
-
 import mcp_client
-
-load_dotenv()
+from llm_utils import OLLAMA_MODEL, OLLAMA_BASE_URL, get_client
 
 # --------------------------------------------------------------------------
 # --- 1. CONFIGURATION ---
 # --------------------------------------------------------------------------
-
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "phi4-mini")
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
 SYSTEM_PROMPT = (
     "You are an inventory reconciliation specialist for a field service company.\n"
@@ -47,9 +39,11 @@ TOOLS = [
         "function": {
             "name": "execute_query",
             "description": (
-                "Run a read-only SELECT query against the Inventory SQL Server database. "
-                "Always set database to 'Inventory'. "
-                "Example: SELECT * FROM dbo.IntegrationTransactions WHERE PartID = 'ABC123'"
+                "Run a read-only SELECT query against a SQL Server database. "
+                "Set database to 'Inventory', 'IntegrationDB', or 'T2Online' depending on the table. "
+                "IntegrationTransactions and IntegrationStatusLookup are in Inventory. "
+                "IV00102 and SOP10200 are in IntegrationDB. "
+                "TicketCallMain, TicketPartsMain, and InventQuantities are in T2Online."
             ),
             "parameters": {
                 "type": "object",
@@ -60,7 +54,7 @@ TOOLS = [
                     },
                     "database": {
                         "type": "string",
-                        "description": "Database name. Always use 'Inventory'.",
+                        "description": "Database name: 'Inventory', 'IntegrationDB', or 'T2Online'.",
                         "default": "Inventory",
                     },
                 },
@@ -73,15 +67,15 @@ TOOLS = [
         "function": {
             "name": "list_tables",
             "description": (
-                "List all tables in the Inventory database. "
-                "Use this to discover available tables before writing a query."
+                "List all tables in a database. "
+                "Set database to 'Inventory', 'IntegrationDB', or 'T2Online'."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "database": {
                         "type": "string",
-                        "description": "Database name. Always use 'Inventory'.",
+                        "description": "Database name: 'Inventory', 'IntegrationDB', or 'T2Online'.",
                         "default": "Inventory",
                     },
                 },
@@ -94,8 +88,8 @@ TOOLS = [
         "function": {
             "name": "describe_table",
             "description": (
-                "Get column names, data types, and constraints for a specific table "
-                "in the Inventory database. Use this before querying an unfamiliar table."
+                "Get column names, data types, and constraints for a specific table. "
+                "Set database to 'Inventory', 'IntegrationDB', or 'T2Online'."
             ),
             "parameters": {
                 "type": "object",
@@ -106,7 +100,7 @@ TOOLS = [
                     },
                     "database": {
                         "type": "string",
-                        "description": "Database name. Always use 'Inventory'.",
+                        "description": "Database name: 'Inventory', 'IntegrationDB', or 'T2Online'.",
                         "default": "Inventory",
                     },
                     "schema": {
@@ -233,7 +227,7 @@ async def run_agent(user_request: str):
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_request},
     ]
-    client = ollama.AsyncClient(host=OLLAMA_BASE_URL)
+    client = get_client()
 
     # --- Agentic loop: up to 4 turns to handle tool calls and retries ---
     MAX_TURNS = 4
@@ -255,11 +249,11 @@ async def run_agent(user_request: str):
             print(msg.content)
             break
 
+        messages.append(msg)
         for fn_name, fn_args in tool_calls:
             print(f"--- TOOL CALL: {fn_name}({fn_args}) ---")
             result = await dispatch_tool(fn_name, fn_args)
             print(f"--- TOOL RESULT: {len(result)} chars ---\n")
-            messages.append(msg)
             messages.append({"role": "tool", "content": result})
 
         # If this was the last allowed turn, force a final summary

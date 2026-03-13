@@ -88,3 +88,25 @@ async def call_tool(name: str, arguments: dict) -> str:
         return combined
     except (json.JSONDecodeError, ValueError):
         return json.dumps({"result": combined})
+
+
+def parse_rows(raw: str) -> list[dict]:
+    """
+    Parse a raw JSON string from call_tool into a list of row dicts.
+    Handles list responses, dict responses with rows/result/data/results keys,
+    and single-dict responses. Returns [] on error or empty results.
+    """
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return []
+
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("rows", "result", "data", "results"):
+            if key in data and isinstance(data[key], list):
+                return data[key]
+        if not data.get("error"):
+            return [data]
+    return []

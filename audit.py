@@ -11,7 +11,6 @@ Usage:
 """
 
 import asyncio
-import json
 import os
 import textwrap
 from collections import Counter
@@ -71,6 +70,7 @@ SELECT
     it.ItGPDocID                        AS GPDocID,
     it.ItLongError                      AS IntegrationError,
     it.it_retry_count                   AS RetryCount,
+    it.ItProcessDate                    AS ProcessDate,
     it.ItPKey                           AS IntegrationID
 FROM Inventory.dbo.IntegrationTransactions it
 JOIN Inventory.dbo.IntegrationStatusLookup ist
@@ -96,6 +96,7 @@ SELECT
     NULL                            AS GPDocID,
     NULL                            AS IntegrationError,
     0                               AS RetryCount,
+    NULL                            AS ProcessDate,
     NULL                            AS IntegrationID
 FROM T2Online.dbo.TicketCallMain tcm
 JOIN T2Online.dbo.TicketPartsMain tcp
@@ -254,6 +255,18 @@ def classify(row: dict, gp_qty: dict, rinv_records: list) -> dict:
     }
 
 
+_FIX_TYPE_MAP = {
+    "QTYFULFI_STALE":    "RESET_TO_PENDING",
+    "STUCK_PROCESSING":  "RESET_TO_PENDING",
+    "QTY_SHORTAGE":      "CYCLE_COUNT_TBD",
+    "QTY_SHORTAGE_RINV": "CYCLE_COUNT_TBD",
+}
+
+def get_fix_type(category: str) -> str:
+    """Map error category to a triage fix-type label."""
+    return _FIX_TYPE_MAP.get(category, "HUMAN_ACTION")
+
+
 # ---------------------------------------------------------------------------
 # MCP helpers
 # ---------------------------------------------------------------------------
@@ -265,23 +278,7 @@ async def run_query(label: str, sql: str, database: str = "Inventory") -> list[d
     raw = await mcp_client.call_tool("execute_query", {"query": sql, "database": database})
     log(f"  [RAW]   {raw[:300]}{'...' if len(raw) > 300 else ''}")
 
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        log("  [WARN]  Could not parse response as JSON — returning empty")
-        return []
-
-    # MCP server may return {"rows": [...]} or a bare list
-    if isinstance(data, list):
-        return data
-    if isinstance(data, dict):
-        for key in ("rows", "result", "data", "results"):
-            if key in data and isinstance(data[key], list):
-                return data[key]
-        # Single-row dict (e.g. SELECT 1)
-        if not data.get("error"):
-            return [data]
-    return []
+    return mcp_client.parse_rows(raw)
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +330,19 @@ def write_excel(detail_rows: list[dict], filename: str):
         ws_sum.append([category, count])
         log(f"  {category}: {count}")
 
+    # Triage summary section
+    fix_counts = Counter(r["FixType"] for r in detail_rows)
+    ws_sum.append([])  # blank separator row
+    ws_sum.append(["Triage Summary", ""])
+    for cell in ws_sum[ws_sum.max_row]:
+        cell.font = Font(bold=True)
+    for fix_type in ("RESET_TO_PENDING", "CYCLE_COUNT_TBD", "HUMAN_ACTION"):
+        ws_sum.append([fix_type, fix_counts.get(fix_type, 0)])
+    auto_fixable = fix_counts.get("RESET_TO_PENDING", 0) + fix_counts.get("CYCLE_COUNT_TBD", 0)
+    ws_sum.append(["Total Auto-Fixable", auto_fixable])
+    for cell in ws_sum[ws_sum.max_row]:
+        cell.font = Font(bold=True)
+
     ws_sum.column_dimensions["A"].width = 28
     ws_sum.column_dimensions["B"].width = 10
 
@@ -340,7 +350,8 @@ def write_excel(detail_rows: list[dict], filename: str):
     ws_det = wb.create_sheet("Detail")
     columns = [
         "Company", "TicketID", "PartLineID", "PartNumber", "QuantityNeeded", "Location",
-        "StatusID", "StatusDescription", "ErrorCategory",
+        "ProcessDate", "DaysOpen",
+        "StatusID", "StatusDescription", "ErrorCategory", "FixType",
         "GPQtyOnHand", "GPAllocated", "GPAvailable", "Deficit",
         "HasRINV", "RetryCount", "IntegrationError",
         "RecommendedAction", "IntegrationID",
@@ -355,7 +366,8 @@ def write_excel(detail_rows: list[dict], filename: str):
 
     col_widths = {
         "Company": 14, "TicketID": 14, "PartLineID": 12, "PartNumber": 18, "QuantityNeeded": 14,
-        "Location": 12, "StatusID": 10, "StatusDescription": 22, "ErrorCategory": 22,
+        "Location": 12, "ProcessDate": 14, "DaysOpen": 10,
+        "StatusID": 10, "StatusDescription": 22, "ErrorCategory": 22, "FixType": 20,
         "GPQtyOnHand": 14, "GPAllocated": 14, "GPAvailable": 14, "Deficit": 10,
         "HasRINV": 10, "RetryCount": 12, "IntegrationError": 40,
         "RecommendedAction": 55, "IntegrationID": 16,
@@ -365,6 +377,34 @@ def write_excel(detail_rows: list[dict], filename: str):
         ws_det.column_dimensions[letter].width = col_widths.get(col, 14)
 
     ws_det.freeze_panes = "A2"
+
+    # --- Staged Fixes tab ---
+    staged_rows = [r for r in detail_rows if r.get("FixType") != "HUMAN_ACTION"]
+    staged_rows.sort(key=lambda r: r.get("DaysOpen") if isinstance(r.get("DaysOpen"), int) else 0, reverse=True)
+
+    ws_fix = wb.create_sheet("Staged Fixes")
+    fix_columns = [
+        "Company", "TicketID", "PartLineID", "PartNumber",
+        "Location", "ErrorCategory", "DaysOpen", "FixType",
+    ]
+    _header_row(ws_fix, fix_columns)
+
+    for row in staged_rows:
+        ws_fix.append([row.get(c, "") for c in fix_columns])
+        fill = CATEGORY_FILLS.get(row.get("ErrorCategory", "OTHER"), _DEFAULT_FILL)
+        for cell in ws_fix[ws_fix.max_row]:
+            cell.fill = fill
+
+    fix_col_widths = {
+        "Company": 14, "TicketID": 14, "PartLineID": 12, "PartNumber": 18,
+        "Location": 12, "ErrorCategory": 22, "DaysOpen": 10, "FixType": 20,
+    }
+    for i, col in enumerate(fix_columns, 1):
+        letter = openpyxl.utils.get_column_letter(i)
+        ws_fix.column_dimensions[letter].width = fix_col_widths.get(col, 14)
+
+    ws_fix.freeze_panes = "A2"
+    log(f"  Staged Fixes tab: {len(staged_rows)} auto-fixable row(s)")
 
     wb.save(filename)
     log(f"\n[DONE] Report written → {filename}")
@@ -452,12 +492,27 @@ async def main():
 
             # 3: Classify
             classification = classify(row, gp_qty, rinv_rows)
-            log(f"  [CLASSIFY] category={classification['category']}")
+            category = classification["category"]
+            fix_type = get_fix_type(category)
+            log(f"  [CLASSIFY] category={category}  fix_type={fix_type}")
             log(f"             action={classification['action']}")
 
             on_hand = gp_qty.get("QTYONHND", 0)
             alloc   = gp_qty.get("ATYALLOC", 0)
             deficit = max(0, needed - on_hand)
+
+            # Parse ProcessDate → DaysOpen
+            raw_date = row.get("ProcessDate")
+            process_date = ""
+            days_open = ""
+            if raw_date:
+                try:
+                    dt = datetime.fromisoformat(str(raw_date).replace("Z", "+00:00"))
+                    process_date = dt.strftime("%Y-%m-%d")
+                    naive = dt.replace(tzinfo=None) if dt.tzinfo else dt
+                    days_open = (datetime.now() - naive).days
+                except (ValueError, TypeError):
+                    pass
 
             detail_rows.append({
                 "Company":           company,
@@ -466,9 +521,12 @@ async def main():
                 "PartNumber":        part,
                 "QuantityNeeded":    needed,
                 "Location":          location,
+                "ProcessDate":       process_date,
+                "DaysOpen":          days_open,
                 "StatusID":          row.get("StatusID", ""),
                 "StatusDescription": row.get("StatusDescription", ""),
-                "ErrorCategory":     classification["category"],
+                "ErrorCategory":     category,
+                "FixType":           fix_type,
                 "GPQtyOnHand":       on_hand,
                 "GPAllocated":       alloc,
                 "GPAvailable":       on_hand - alloc,

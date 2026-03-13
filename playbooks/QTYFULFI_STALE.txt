@@ -1,0 +1,20 @@
+CATEGORY: QTYFULFI_STALE
+FIX_TYPE: RESET_TO_PENDING
+
+CONTEXT: This part failed consumption with a "quantity not enough" error, but the audit found GP has sufficient stock (QTYONHND >= needed) and ATYALLOC = 0. The failure is likely stale — GP qty recovered since the original error. The proposed fix is to reset the integration record to Pending so it reprocesses.
+
+EVIDENCE PROVIDED:
+- GP qty: current QTYONHND, ATYALLOC, QTYCOMTD from IV00102
+- Open sales orders: SOP10200 rows for this part+location (may re-allocate stock)
+- Trakker qty: IqtQtyOnHand comparison
+
+DECISION TREE:
+1. If SOP10200 has 1+ open orders for this part+location → ESCALATE (sales order may re-allocate qty when TMIN reprocesses)
+2. If GP QTYONHND < QuantityNeeded now → RECLASSIFY as QTY_SHORTAGE (stock dropped since audit)
+3. If ATYALLOC > 0 now → RECLASSIFY as QTYFULFI (genuine allocation lock appeared)
+4. If GP QTYONHND >= QuantityNeeded AND ATYALLOC = 0 AND no open orders → CONFIRM reset to Pending is safe
+
+OUTPUT FORMAT (exactly 3 lines):
+verdict: CONFIRM|ESCALATE|RECLASSIFY
+reason: <one sentence explaining why>
+new_category: <only if RECLASSIFY, otherwise omit>

@@ -1,0 +1,18 @@
+CATEGORY: CONTRACT_LOCATION
+FIX_TYPE: HUMAN_ACTION
+
+CONTEXT: The part is on contract and must be moved to the contract-designated location before consumption can proceed.
+
+EVIDENCE PROVIDED:
+- GP qty: current QTYONHND, ATYALLOC at current location
+- Entity info: AcqName, DbName, AcqHWSStockLocation from AcqAcquisitionLookup
+
+DECISION TREE:
+1. If the current Location matches AcqHWSStockLocation → RECLASSIFY as QTYFULFI_STALE (part is already at the right location — stale error)
+2. If GP has 0 stock at current location → ESCALATE (nothing to move — part may be lost)
+3. Otherwise → CONFIRM human action needed (move part to contract location)
+
+OUTPUT FORMAT (exactly 3 lines):
+verdict: CONFIRM|ESCALATE|RECLASSIFY
+reason: <one sentence explaining why>
+new_category: <only if RECLASSIFY, otherwise omit>

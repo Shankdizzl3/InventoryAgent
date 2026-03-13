@@ -1,0 +1,21 @@
+CATEGORY: STUCK_PROCESSING
+FIX_TYPE: RESET_TO_PENDING
+
+CONTEXT: This TMIN record is stuck at StatusID=5 (Processing). It never completed. The proposed fix is to reset to StatusID=4 (Pending) so the integration engine picks it up again.
+
+EVIDENCE PROVIDED:
+- GP qty: current QTYONHND, ATYALLOC, QTYCOMTD from IV00102
+- Intercompany transfers: recent TINV records for this part+location (may indicate a transfer in progress)
+- TMIN status breakdown: count of records per status for this part+location
+
+DECISION TREE:
+1. If intercompany TINV records exist with StatusID=5 → ESCALATE (transfer also stuck — may need coordinated reset)
+2. If GP QTYONHND < QuantityNeeded → ESCALATE (not enough stock even if reset succeeds)
+3. If ATYALLOC > 0 → ESCALATE (allocation lock — resetting may double-allocate)
+4. If multiple TMIN records exist for same part+location with StatusID=5 → ESCALATE (batch stuck — reset all together)
+5. If GP has stock, no allocation, no stuck transfers → CONFIRM reset to Pending is safe
+
+OUTPUT FORMAT (exactly 3 lines):
+verdict: CONFIRM|ESCALATE|RECLASSIFY
+reason: <one sentence explaining why>
+new_category: <only if RECLASSIFY, otherwise omit>

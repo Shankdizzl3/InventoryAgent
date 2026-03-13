@@ -1,0 +1,20 @@
+CATEGORY: NOT_INTEGRATED
+FIX_TYPE: HUMAN_ACTION
+
+CONTEXT: This ticket part has no TMIN integration record at all. The part was used on a ticket in Trakker but was never sent to GP for consumption.
+
+EVIDENCE PROVIDED:
+- GP qty: current QTYONHND, ATYALLOC, QTYCOMTD
+- Trakker qty: IqtQtyOnHand, IqtQtyConsume
+- Any IT records: check if any integration records exist for this part line (maybe non-TMIN)
+
+DECISION TREE:
+1. If IT records exist (any type) for this TicketLineItemID → RECLASSIFY (has records — may be miscategorized; check the type)
+2. If GP QTYONHND = 0 AND Trakker OnHand = 0 → ESCALATE (both systems empty — part may already be consumed through another mechanism)
+3. If GP has stock → CONFIRM needs TMIN INSERT (stock exists, just missing the integration record)
+4. Otherwise → ESCALATE (no stock anywhere — needs investigation)
+
+OUTPUT FORMAT (exactly 3 lines):
+verdict: CONFIRM|ESCALATE|RECLASSIFY
+reason: <one sentence explaining why>
+new_category: <only if RECLASSIFY, otherwise omit>

@@ -1,0 +1,23 @@
+CATEGORY: QTY_SHORTAGE
+FIX_TYPE: CYCLE_COUNT_TBD
+
+CONTEXT: GP does not have enough stock to fulfill this consumption. The proposed fix is a Cycle Count adjustment to add the deficit quantity, then reset the record to Pending.
+
+EVIDENCE PROVIDED:
+- GP qty: current QTYONHND, ATYALLOC, QTYCOMTD from IV00102
+- Trakker qty: IqtQtyOnHand, IqtQtyConsume (Trakker's view of inventory)
+- TINV/PINV history: recent transfer and PO receipt records for this part+location
+- RINV history: recent removal records that may explain the shortage
+
+DECISION TREE:
+1. If GP QTYONHND >= QuantityNeeded now → RECLASSIFY as QTYFULFI_STALE (stock arrived since audit — just reprocess)
+2. If RINV records exist with StatusID=1 (successful removal) in last 30 days → ESCALATE (recent removal may be the cause — investigate before cycle count)
+3. If Trakker OnHand > GP QTYONHND → CONFIRM cycle count (Trakker thinks stock exists, GP disagrees — cycle count corrects GP)
+4. If Trakker OnHand = 0 AND GP QTYONHND = 0 → ESCALATE (both systems agree stock is zero — part may genuinely be gone)
+5. If PINV records exist with StatusID != 1 → ESCALATE (PO receipt may be pending — wait for it)
+6. Otherwise → CONFIRM cycle count for deficit quantity
+
+OUTPUT FORMAT (exactly 3 lines):
+verdict: CONFIRM|ESCALATE|RECLASSIFY
+reason: <one sentence explaining why>
+new_category: <only if RECLASSIFY, otherwise omit>

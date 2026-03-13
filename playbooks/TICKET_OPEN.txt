@@ -1,0 +1,17 @@
+CATEGORY: TICKET_OPEN
+FIX_TYPE: HUMAN_ACTION
+
+CONTEXT: The integration error says the ticket is still open — parts cannot be consumed until the ticket is closed in Trakker. This normally requires human action.
+
+EVIDENCE PROVIDED:
+- Ticket state: TcaPKey, TcaCallDate, TcpConsumed from T2Online
+
+DECISION TREE:
+1. If TcpConsumed = 1 → RECLASSIFY as QTYFULFI_STALE (ticket was already consumed — stale error, just reprocess)
+2. If ticket is very old (> 90 days) → ESCALATE (likely abandoned ticket — needs manager review to close)
+3. Otherwise → CONFIRM human action needed (close ticket first, then reprocess)
+
+OUTPUT FORMAT (exactly 3 lines):
+verdict: CONFIRM|ESCALATE|RECLASSIFY
+reason: <one sentence explaining why>
+new_category: <only if RECLASSIFY, otherwise omit>
