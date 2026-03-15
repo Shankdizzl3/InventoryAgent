@@ -1,7 +1,7 @@
 """
 audit.py — Inventory Reconciliation Walking Skeleton
 
-Pure Python, no LLM. Connects via MCP client (mcp_client.py → mssql-mcp-server).
+Pure Python, no LLM. Connects via MCP client (mcp_client.py -> mssql-mcp-server).
 Runs the runbook Step 1 query to find unconsumed maintenance ticket parts, then
 diagnoses each via GP qty (IV00102) and RINV history checks, classifies the error,
 and writes findings to Excel with Summary + Detail tabs.
@@ -29,7 +29,7 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 
 def log(msg: str):
-    print(msg, flush=True)
+    print(msg.encode("ascii", "replace").decode("ascii"), flush=True)
 
 def log_query(label: str, database: str, sql: str):
     log(f"\n  [QUERY] {label}")
@@ -82,10 +82,12 @@ WHERE it.ItGPDocID LIKE 'TMIN%'
   AND ISNULL(tcp.TcpConsumed, 0) = 0
 """).strip()
 
-# Query 1b: NOT_INTEGRATED tickets — parts in T2Online with no TMIN record at all.
-# Scoped to last 90 days to avoid full-table scan on 1.1M-row TicketCallMain.
-QUERY_NOT_INTEGRATED = textwrap.dedent("""
+# Query 1b: NOT_INTEGRATED candidates — closed-ticket parts in T2Online with
+# unconsumed parts. Scoped to 30 days + closed tickets only to avoid full-table scan.
+# Step 2 (batch TMIN check in Python) filters out parts that DO have TMIN records.
+QUERY_NOT_INTEGRATED_CANDIDATES = textwrap.dedent("""
 SELECT
+    tcp.TcpPKey                     AS PartLineID,
     'UNKNOWN'                       AS Company,
     tcm.TcaPKey                     AS TicketID,
     tcp.TcpPartNumber               AS PartNumber,
@@ -98,18 +100,23 @@ SELECT
     0                               AS RetryCount,
     NULL                            AS ProcessDate,
     NULL                            AS IntegrationID
-FROM T2Online.dbo.TicketCallMain tcm
-JOIN T2Online.dbo.TicketPartsMain tcp
-    ON tcp.TcaPKey = tcm.TcaPKey
+FROM T2Online.dbo.TicketPartsMain tcp
+JOIN T2Online.dbo.TicketCallMain tcm
+    ON tcm.TcaPKey = tcp.TcaPKey
 WHERE ISNULL(tcp.TcpConsumed, 0) = 0
   AND ISNULL(tcp.TcpQuantityOrdered, 0) > 0
-  AND tcm.TcaCallDate >= DATEADD(day, -90, GETDATE())
-  AND NOT EXISTS (
-      SELECT 1
-      FROM Inventory.dbo.IntegrationTransactions it2
-      WHERE it2.TicketLineItemID = tcp.TcpPKey
-        AND it2.ItGPDocID LIKE 'TMIN%'
-  )
+  AND tcm.TcaStatus = 'C'
+  AND tcm.TcaCallDate >= DATEADD(day, -30, GETDATE())
+""").strip()
+
+# Query 1c: Batch check — which TcpPKey values already have TMIN records?
+# Called with a comma-separated list of IDs. Returns only IDs that HAVE a TMIN.
+QUERY_HAS_TMIN = textwrap.dedent("""
+SELECT TicketLineItemID
+FROM Inventory.dbo.IntegrationTransactions
+WHERE TicketLineItemID IN ({ids})
+  AND ItGPDocID LIKE 'TMIN%'
+GROUP BY TicketLineItemID
 """).strip()
 
 # Query 3: GP item-location qty for a specific part + location.
@@ -407,7 +414,7 @@ def write_excel(detail_rows: list[dict], filename: str):
     log(f"  Staged Fixes tab: {len(staged_rows)} auto-fixable row(s)")
 
     wb.save(filename)
-    log(f"\n[DONE] Report written → {filename}")
+    log(f"\n[DONE] Report written -> {filename}")
 
 
 # ---------------------------------------------------------------------------
@@ -430,19 +437,45 @@ async def main():
         log("  MCP server is reachable.\n")
 
         # ------------------------------------------------------------------
-        # Step 1a+b: Run both main queries in parallel.
-        #   1a: Failed/stuck TMIN records from IntegrationTransactions (small set).
-        #   1b: NOT_INTEGRATED parts from T2Online (last 90 days, no TMIN record).
+        # Step 1a: Failed/stuck TMIN records from IntegrationTransactions.
         # ------------------------------------------------------------------
-        log("Step 1: Pulling failed/stuck TMIN records and NOT_INTEGRATED parts in parallel...")
-        failed_tickets, not_integrated = await asyncio.gather(
-            run_query("Failed/stuck TMIN records", QUERY_FAILED_TMIN, database="Inventory"),
-            run_query("NOT_INTEGRATED parts (last 90 days)", QUERY_NOT_INTEGRATED, database="T2Online"),
-        )
+        log("Step 1a: Pulling failed/stuck TMIN records...")
+        failed_tickets = await run_query("Failed/stuck TMIN records", QUERY_FAILED_TMIN, database="Inventory")
         log_result(failed_tickets, preview_cols=["Company", "TicketID", "PartNumber", "Location"])
         log(f"  Found {len(failed_tickets)} failed/stuck ticket part(s).")
-        log_result(not_integrated, preview_cols=["TicketID", "PartNumber", "Location"])
-        log(f"  Found {len(not_integrated)} not-integrated ticket part(s).\n")
+
+        # ------------------------------------------------------------------
+        # Step 1b: NOT_INTEGRATED — two-step approach to avoid cross-DB timeout.
+        #   1b-i:  Get candidates from T2Online (closed tickets, 30 days).
+        #   1b-ii: Batch-check which ones already have TMIN records.
+        # ------------------------------------------------------------------
+        log("\nStep 1b: Pulling NOT_INTEGRATED candidates (closed tickets, 30 days)...")
+        candidates = await run_query(
+            "NOT_INTEGRATED candidates", QUERY_NOT_INTEGRATED_CANDIDATES, database="T2Online"
+        )
+        log(f"  Found {len(candidates)} candidate part(s) from closed tickets.")
+
+        not_integrated = []
+        if candidates:
+            # Batch check: which candidates already have a TMIN record?
+            pkey_list = [str(c["PartLineID"]) for c in candidates if c.get("PartLineID")]
+            # Process in batches of 500 to stay under SQL parameter limits
+            has_tmin_set = set()
+            for batch_start in range(0, len(pkey_list), 500):
+                batch = pkey_list[batch_start:batch_start + 500]
+                ids_str = ",".join(batch)
+                tmin_rows = await run_query(
+                    f"TMIN batch check ({batch_start+1}-{batch_start+len(batch)})",
+                    QUERY_HAS_TMIN.format(ids=ids_str),
+                    database="Inventory",
+                )
+                for r in tmin_rows:
+                    has_tmin_set.add(r.get("TicketLineItemID"))
+
+            not_integrated = [c for c in candidates if c.get("PartLineID") not in has_tmin_set]
+            log(f"  {len(has_tmin_set)} candidates already have TMIN records (excluded).")
+
+        log(f"  Found {len(not_integrated)} truly not-integrated ticket part(s).\n")
 
         tickets = failed_tickets + not_integrated
 
@@ -501,7 +534,7 @@ async def main():
             alloc   = gp_qty.get("ATYALLOC", 0)
             deficit = max(0, needed - on_hand)
 
-            # Parse ProcessDate → DaysOpen
+            # Parse ProcessDate -> DaysOpen
             raw_date = row.get("ProcessDate")
             process_date = ""
             days_open = ""

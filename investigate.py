@@ -33,7 +33,7 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 
 def log(msg: str):
-    print(msg, flush=True)
+    print(msg.encode("ascii", "replace").decode("ascii"), flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +226,7 @@ def write_investigation_excel(results: list[dict], filename: str):
     ws_det.freeze_panes = "A2"
 
     wb.save(filename)
-    log(f"[DONE] Investigation report written → {filename}")
+    log(f"[DONE] Investigation report written -> {filename}")
 
 
 # ---------------------------------------------------------------------------
